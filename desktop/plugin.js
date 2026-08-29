@@ -229,6 +229,44 @@ export async function terminateSession(terminate) {
   }
 }
 
+function AuditHistory({ audit }) {
+  const events = Array.isArray(audit) ? audit : []
+  if (!events.length) return null
+  return jsxs('section', {
+    'aria-label': 'Audit history',
+    className: 'grid gap-2 border-t border-(--ui-stroke-secondary) pt-3',
+    children: [
+      jsx('h3', { className: 'text-xs font-semibold', children: 'Audit history' }),
+      jsx('ol', {
+        className: 'grid gap-2',
+        children: events.map(event => jsxs('li', {
+          className: 'grid gap-1 rounded bg-(--ui-surface-secondary) px-2 py-1.5 text-xs',
+          children: [
+            jsx('span', {
+              className: 'font-medium',
+              children: event.event_type === 'decision'
+                ? `${event.decision} by ${event.actor_kind}`
+                : `effect ${event.outcome}`
+            }),
+            event.comment && jsx('p', {
+              className: 'whitespace-pre-wrap text-(--ui-text-secondary)',
+              children: event.comment
+            }),
+            event.event_type === 'receipt' && jsx('span', {
+              className: 'break-all text-[0.6875rem] text-(--ui-text-tertiary)',
+              children: `Result digest ${event.result_digest}`
+            }),
+            jsx('time', {
+              className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+              children: event.created_at
+            })
+          ]
+        }, event.id))
+      })
+    ]
+  })
+}
+
 function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
   const [comment, setComment] = useState('')
   const [busy, setBusy] = useState('')
@@ -364,6 +402,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           jsx('span', { children: request.created_at })
         ]
       }),
+      jsx(AuditHistory, { audit: request.audit }),
       pending && jsxs('div', {
         className: 'grid gap-2 border-t border-(--ui-stroke-secondary) pt-3',
         children: [

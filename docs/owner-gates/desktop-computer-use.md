@@ -4,6 +4,7 @@ Status: blocked on the macOS capture path only. Backend, policy, persistence, an
 
 ## Observed
 
+- Retried at 2026-08-29 09:43 ADT after adding bounded card audit history. Exact Hermes capture still returned a zero by zero image with no accessibility elements.
 - Retried at 2026-08-29 09:29 ADT after adding safe pre-dispatch resume recovery. `list_apps` found the running Hermes process, but exact Hermes capture still returned a zero by zero image with no accessibility elements. Cua Driver appeared installed but not running in the app inventory.
 - Retried at 2026-08-29 08:20 ADT after adding approval revocation. `list_apps` found the running Hermes process, but exact Hermes capture still returned a zero by zero image with no accessibility elements.
 - The earlier 2026-08-29 06:16 ADT retry listed two running Hermes windows and a macOS `Screen Recording` permission window.

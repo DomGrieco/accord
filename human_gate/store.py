@@ -160,6 +160,12 @@ class GateStore:
                 created_at TEXT NOT NULL
             );
 
+            CREATE INDEX IF NOT EXISTS decisions_by_request_and_created_at
+            ON decisions(request_id, created_at);
+
+            CREATE INDEX IF NOT EXISTS receipts_by_request_and_created_at
+            ON receipts(request_id, created_at);
+
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -521,6 +527,63 @@ class GateStore:
         if row is None:
             return None
         return Decision(str(row["decision"])), str(row["comment"])
+
+    def audit_history(self, request_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.audit_history_for_requests([request_id], limit=limit)[request_id]
+
+    def audit_history_for_requests(
+        self, request_ids: list[str], *, limit: int = 100
+    ) -> dict[str, list[dict[str, Any]]]:
+        unique_ids = list(dict.fromkeys(request_ids))
+        if len(unique_ids) > 500:
+            raise ValueError("audit history supports at most 500 requests")
+        histories: dict[str, list[dict[str, Any]]] = {
+            request_id: [] for request_id in unique_ids
+        }
+        if not unique_ids:
+            return histories
+        bounded_limit = max(1, min(limit, 500))
+        placeholders = ",".join("?" for _ in unique_ids)
+        decision_rows = self._connection.execute(
+            f"""
+            SELECT id, request_id, decision, actor_kind, actor_id, comment, created_at
+            FROM decisions WHERE request_id IN ({placeholders}) ORDER BY created_at ASC
+            """,  # noqa: S608 - placeholders are generated, values remain parameterized
+            unique_ids,
+        ).fetchall()
+        receipt_rows = self._connection.execute(
+            f"""
+            SELECT id, request_id, outcome, result_digest, created_at
+            FROM receipts WHERE request_id IN ({placeholders}) ORDER BY created_at ASC
+            """,  # noqa: S608 - placeholders are generated, values remain parameterized
+            unique_ids,
+        ).fetchall()
+        for row in decision_rows:
+            histories[str(row["request_id"])].append(
+                {
+                    "id": str(row["id"]),
+                    "event_type": "decision",
+                    "decision": str(row["decision"]),
+                    "actor_kind": str(row["actor_kind"]),
+                    "actor_id": str(row["actor_id"]),
+                    "comment": str(row["comment"]),
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        for row in receipt_rows:
+            histories[str(row["request_id"])].append(
+                {
+                    "id": str(row["id"]),
+                    "event_type": "receipt",
+                    "outcome": str(row["outcome"]),
+                    "result_digest": str(row["result_digest"]),
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        for request_id, events in histories.items():
+            events.sort(key=lambda event: (str(event["created_at"]), str(event["event_type"])))
+            histories[request_id] = events[:bounded_limit]
+        return histories
 
     def claim(self, request_id: str, *, expected_digest: str) -> bool:
         now = _now()

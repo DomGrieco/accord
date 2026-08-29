@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -26,7 +26,7 @@ def default_db_path() -> Path:
     return resolve_db_path()
 
 
-def _record(record: RequestRecord) -> dict[str, object]:
+def _record(record: RequestRecord, audit: list[dict[str, Any]]) -> dict[str, object]:
     return {
         "id": record.id,
         "record_version": record.record_version,
@@ -40,6 +40,7 @@ def _record(record: RequestRecord) -> dict[str, object]:
         "resume_state": record.resume_state.value,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
+        "audit": audit,
     }
 
 
@@ -109,7 +110,8 @@ def build_router(path: str | Path) -> APIRouter:
         store = GateStore(db_path)
         try:
             items = store.list_requests(states=states or None, limit=limit)
-            return {"requests": [_record(item) for item in items]}
+            histories = store.audit_history_for_requests([item.id for item in items])
+            return {"requests": [_record(item, histories[item.id]) for item in items]}
         finally:
             store.close()
 
@@ -120,7 +122,7 @@ def build_router(path: str | Path) -> APIRouter:
             record = store.get_request(request_id)
             if record is None:
                 raise HTTPException(status_code=404, detail="request not found")
-            return {"request": _record(record)}
+            return {"request": _record(record, store.audit_history(record.id))}
         finally:
             store.close()
 
@@ -144,7 +146,7 @@ def build_router(path: str | Path) -> APIRouter:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {
-                "request": _record(record),
+                "request": _record(record, store.audit_history(record.id)),
                 "resume": None,
                 "terminate": _terminate(record, decision),
             }
@@ -160,7 +162,7 @@ def build_router(path: str | Path) -> APIRouter:
                 record = store.mark_resume_delivered(request_id)
             except ConflictError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-            return {"request": _record(record)}
+            return {"request": _record(record, store.audit_history(record.id))}
         finally:
             store.close()
 
@@ -173,7 +175,7 @@ def build_router(path: str | Path) -> APIRouter:
                 record = store.mark_resume_failed(request_id)
             except ConflictError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
-            return {"request": _record(record)}
+            return {"request": _record(record, store.audit_history(record.id))}
         finally:
             store.close()
 
@@ -193,7 +195,7 @@ def build_router(path: str | Path) -> APIRouter:
                 raise HTTPException(status_code=409, detail="request has no decision")
             decision, comment = latest
             return {
-                "request": _record(record),
+                "request": _record(record, store.audit_history(record.id)),
                 "resume": _resume(record, decision, comment),
             }
         finally:
@@ -213,7 +215,7 @@ def build_router(path: str | Path) -> APIRouter:
             if latest is None or latest[0] is not Decision.DENY:
                 raise HTTPException(status_code=409, detail="request was not denied")
             return {
-                "request": _record(record),
+                "request": _record(record, store.audit_history(record.id)),
                 "terminate": _terminate(record, Decision.DENY),
             }
         finally:

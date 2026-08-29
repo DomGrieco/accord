@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from human_gate.models import RequestState, ResumeState
+from human_gate.models import Decision, RequestState, ResumeState
 from human_gate.store import GateStore
 
 OWNER_TOKEN = "o" * 64
@@ -53,6 +53,58 @@ def _decision_body(request, decision: str, comment: str = "", token: str = OWNER
         "digest": request.call_digest,
         "record_version": request.record_version,
     }
+
+
+def test_request_list_includes_safe_audit_history(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "comment", "Use fewer words."),
+    )
+
+    response = client.get("/requests?state=changes_requested")
+
+    assert response.status_code == 200
+    item = response.json()["requests"][0]
+    assert item["audit"] == [
+        {
+            "id": item["audit"][0]["id"],
+            "event_type": "decision",
+            "decision": "comment",
+            "actor_kind": "owner",
+            "actor_id": "desktop-owner",
+            "comment": "Use fewer words.",
+            "created_at": item["audit"][0]["created_at"],
+        }
+    ]
+    assert "replay" not in item
+
+
+def test_receipt_audit_never_exposes_persisted_display_payload(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    store = GateStore(path)
+    store.decide(request.id, Decision.APPROVE, actor_id="owner")
+    assert store.claim(request.id, expected_digest=request.call_digest)
+    secret = "PERSISTED_RECEIPT_SECRET"
+    store.complete(
+        request.id,
+        RequestState.EXECUTED,
+        result={"ok": True},
+        display={"provider_response": secret},
+    )
+    store.close()
+
+    response = _app(path).get(f"/requests/{request.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert secret not in str(body)
+    assert body["request"]["audit"][-1]["event_type"] == "receipt"
+    assert "display" not in body["request"]["audit"][-1]
 
 
 def test_owner_registration_and_approval_return_durable_resume_instruction(

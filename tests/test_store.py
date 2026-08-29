@@ -36,6 +36,48 @@ def test_runtime_lock_prevents_concurrent_recovery_owner(tmp_path: Path) -> None
     second.close()
 
 
+def test_audit_history_orders_safe_decisions_and_receipts(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    store.decide(
+        request.id,
+        Decision.APPROVE,
+        actor_id="desktop-owner",
+        comment="Approved after review.",
+    )
+    assert store.claim(request.id, expected_digest="digest-a") is True
+    store.complete(
+        request.id,
+        RequestState.EXECUTED,
+        result={"provider_id": "private-result"},
+        display={"status": "published"},
+    )
+
+    events = store.audit_history(request.id)
+    batched = store.audit_history_for_requests([request.id, "missing"])
+
+    assert batched == {request.id: events, "missing": []}
+    assert events == [
+        {
+            "id": events[0]["id"],
+            "event_type": "decision",
+            "decision": "approve",
+            "actor_kind": "owner",
+            "actor_id": "desktop-owner",
+            "comment": "Approved after review.",
+            "created_at": events[0]["created_at"],
+        },
+        {
+            "id": events[1]["id"],
+            "event_type": "receipt",
+            "outcome": "executed",
+            "result_digest": events[1]["result_digest"],
+            "created_at": events[1]["created_at"],
+        },
+    ]
+    assert "private-result" not in str(events)
+
+
 def test_pending_request_persists_across_store_reopen(tmp_path: Path) -> None:
     path = tmp_path / "gate.db"
     first = GateStore(path)

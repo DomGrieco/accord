@@ -66,6 +66,8 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "wakeAttempted" in source
     assert "/resume-instruction" in source
     assert "Retry session wake" in source
+    assert "Audit history" in source
+    assert "request.audit" in source
     assert "Human Gate will not retry it automatically" in source
     assert "setTimeout" in source
     assert "expires" not in source

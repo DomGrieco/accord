@@ -137,12 +137,12 @@ class HumanGate:
         try:
             result = next_call(args)
         except EffectUncertainError as exc:
-            safe_error = f"{type(exc).__name__}: {exc}"
+            safe_error = f"{type(exc).__name__}: effect outcome could not be verified"
             self.store.complete(
                 approved.id,
                 RequestState.UNCERTAIN,
                 result={"error_type": type(exc).__name__},
-                display={"error": safe_error[:1000]},
+                display={"error_type": type(exc).__name__},
             )
             return {
                 "ok": False,
@@ -151,12 +151,12 @@ class HumanGate:
                 "error": safe_error,
             }
         except Exception as exc:
-            safe_error = f"{type(exc).__name__}: {exc}"
+            safe_error = f"{type(exc).__name__}: effect failed"
             self.store.complete(
                 approved.id,
                 RequestState.FAILED,
                 result={"error_type": type(exc).__name__},
-                display={"error": safe_error[:1000]},
+                display={"error_type": type(exc).__name__},
             )
             return {
                 "ok": False,

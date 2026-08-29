@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -170,9 +171,11 @@ def test_executor_exception_records_failed_without_retry(tmp_path: Path) -> None
         session_lineage="stored",
     )
     gate.store.decide(pending.request_id, Decision.APPROVE, actor_id="owner")
+    assert pending.request_id is not None
+    replay_only_secret = "REPLAY_ONLY_SECRET"
 
     def fail(_args: dict):
-        raise RuntimeError("provider rejected request")
+        raise RuntimeError(f"provider rejected payload={replay_only_secret}")
 
     result = gate.execute(
         "x_create_post",
@@ -184,7 +187,22 @@ def test_executor_exception_records_failed_without_retry(tmp_path: Path) -> None
 
     assert result["ok"] is False
     assert result["status"] == "failed"
+    assert replay_only_secret not in str(result)
     assert gate.store.get_request(pending.request_id).state is RequestState.FAILED
+    with sqlite3.connect(tmp_path / "gate.db") as connection:
+        persisted_display = connection.execute(
+            "SELECT display_json FROM receipts WHERE request_id = ?",
+            (pending.request_id,),
+        ).fetchone()[0]
+    assert replay_only_secret not in persisted_display
+    history = gate.store.audit_history(pending.request_id)
+    assert history[-1] == {
+        "id": history[-1]["id"],
+        "event_type": "receipt",
+        "outcome": "failed",
+        "result_digest": history[-1]["result_digest"],
+        "created_at": history[-1]["created_at"],
+    }
 
 
 def test_uncertain_effect_never_reuses_the_approval(tmp_path: Path) -> None:
