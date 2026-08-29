@@ -140,12 +140,47 @@ def test_deny_kills_request_without_waking_session_or_replay_authority(
 
     assert response.status_code == 200
     assert response.json()["resume"] is None
+    assert response.json()["terminate"] == {
+        "stored_session_id": "stored-session",
+        "profile": "life",
+        "request_id": request.id,
+    }
     store = GateStore(path)
     assert store.claim(request.id, expected_digest="d" * 64) is False
     stored = store.get_request(request.id)
     assert stored is not None
     assert stored.state is RequestState.DENIED
     assert stored.resume_state is ResumeState.NOT_REQUESTED
+
+
+def test_denied_request_exposes_authenticated_retryable_termination_instruction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "deny", "Stop this work."),
+    )
+
+    wrong = client.post(
+        f"/requests/{request.id}/termination-instruction",
+        json={"token": "x" * 64},
+    )
+    retry = client.post(
+        f"/requests/{request.id}/termination-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+
+    assert wrong.status_code == 403
+    assert retry.status_code == 200
+    assert retry.json()["terminate"] == {
+        "stored_session_id": "stored-session",
+        "profile": "life",
+        "request_id": request.id,
+    }
 
 
 def test_resume_ack_is_separate_and_authenticated(tmp_path: Path) -> None:

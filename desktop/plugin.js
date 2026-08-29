@@ -159,6 +159,52 @@ async function submitResume(ctx, resume, token) {
   }
 }
 
+export function selectRuntimeToClose(active, storedSessionId) {
+  if (!active || !Array.isArray(active.sessions)) {
+    throw new Error('Hermes returned no valid sessions array.')
+  }
+  for (const row of active.sessions) {
+    if (
+      !row ||
+      typeof row.id !== 'string' ||
+      !row.id ||
+      typeof row.session_key !== 'string' ||
+      !row.session_key
+    ) {
+      throw new Error('Hermes returned a session row without a valid id and session_key.')
+    }
+  }
+  const matches = active.sessions.filter(row => row.session_key === storedSessionId)
+  if (matches.length > 1) {
+    throw new Error('More than one live runtime matched the stored session lineage.')
+  }
+  if (!matches.length) return null
+  const runtimeSessionId = String(matches[0]?.id || '')
+  if (!runtimeSessionId) {
+    throw new Error('The matching live runtime had no session id.')
+  }
+  return runtimeSessionId
+}
+
+export async function terminateSession(terminate) {
+  const route = await profileRoute(terminate.profile)
+  const release = await host.retainProfile(route)
+  try {
+    const active = await host.requestProfile(route, 'session.active_list', {})
+    const runtimeSessionId = selectRuntimeToClose(active, terminate.stored_session_id)
+    if (!runtimeSessionId) return false
+    const result = await host.requestProfile(route, 'session.close', {
+      session_id: runtimeSessionId
+    })
+    if (result?.closed !== true) {
+      throw new Error('Hermes did not confirm that the originating session stopped.')
+    }
+    return true
+  } finally {
+    release()
+  }
+}
+
 function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
   const [comment, setComment] = useState('')
   const [busy, setBusy] = useState('')
@@ -182,7 +228,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           record_version: request.record_version
         }
       })
-      if (decision !== 'deny' && result.resume) {
+      if (result.resume) {
         try {
           await submitResume(ctx, result.resume, ownerToken)
         } catch (resumeError) {
@@ -192,6 +238,8 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           }).catch(() => undefined)
           throw resumeError
         }
+      } else if (result.terminate) {
+        await terminateSession(result.terminate)
       }
       haptic(decision === 'approve' ? 'success' : 'tap')
       host.notify({
@@ -199,7 +247,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
         message: decision === 'approve'
           ? `Approved ${request.tool_name}; the originating session is resuming.`
           : decision === 'deny'
-            ? `Denied ${request.tool_name}; the request is closed.`
+            ? `Denied ${request.tool_name}; the originating session is stopped.`
             : `Decision sent to the originating session.`
       })
       setComment('')
@@ -234,6 +282,29 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
       await onChanged()
+    } finally {
+      setBusy('')
+    }
+  }, [ctx, onChanged, ownerToken, request.id])
+
+  const retryTermination = useCallback(async () => {
+    setBusy('terminate')
+    setError('')
+    try {
+      const result = await ctx.rest(`/requests/${request.id}/termination-instruction`, {
+        method: 'POST',
+        body: { token: ownerToken }
+      })
+      const closed = await terminateSession(result.terminate)
+      host.notify({
+        kind: 'success',
+        message: closed
+          ? 'The originating session is stopped.'
+          : 'The originating session was already stopped.'
+      })
+      await onChanged()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setBusy('')
     }
@@ -312,6 +383,13 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
         disabled: Boolean(busy),
         onClick: () => void retryResume(),
         children: busy === 'resume' ? 'Waking session…' : 'Retry session wake'
+      }),
+      request.state === 'denied' && jsx('button', {
+        type: 'button',
+        className: 'w-fit rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm disabled:opacity-50',
+        disabled: Boolean(busy),
+        onClick: () => void retryTermination(),
+        children: busy === 'terminate' ? 'Stopping session…' : 'Ensure session stopped'
       }),
       error && jsx('div', {
         role: 'alert',

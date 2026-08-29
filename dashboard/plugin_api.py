@@ -71,6 +71,16 @@ def _resume(
     }
 
 
+def _terminate(record: RequestRecord, decision: Decision) -> dict[str, str] | None:
+    if decision is not Decision.DENY:
+        return None
+    return {
+        "stored_session_id": record.session_lineage,
+        "profile": record.profile,
+        "request_id": record.id,
+    }
+
+
 def _authorize(store: GateStore, token: str) -> None:
     if not store.verify_owner_token(token):
         raise HTTPException(status_code=403, detail="owner token rejected")
@@ -136,6 +146,7 @@ def build_router(path: str | Path) -> APIRouter:
             return {
                 "request": _record(record),
                 "resume": _resume(record, decision, body.comment),
+                "terminate": _terminate(record, decision),
             }
         finally:
             store.close()
@@ -189,6 +200,26 @@ def build_router(path: str | Path) -> APIRouter:
             return {
                 "request": _record(record),
                 "resume": _resume(record, decision, comment),
+            }
+        finally:
+            store.close()
+
+    @api.post("/requests/{request_id}/termination-instruction")
+    async def termination_instruction(
+        request_id: str, body: OwnerTokenBody
+    ) -> dict[str, object]:
+        store = GateStore(db_path)
+        try:
+            _authorize(store, body.token)
+            record = store.get_request(request_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail="request not found")
+            latest = store.latest_decision(request_id)
+            if latest is None or latest[0] is not Decision.DENY:
+                raise HTTPException(status_code=409, detail="request was not denied")
+            return {
+                "request": _record(record),
+                "terminate": _terminate(record, Decision.DENY),
             }
         finally:
             store.close()

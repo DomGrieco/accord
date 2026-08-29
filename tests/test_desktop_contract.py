@@ -19,6 +19,19 @@ def test_desktop_plugin_is_valid_esm_syntax() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_desktop_termination_selection_fails_closed() -> None:
+    node = which("node")
+    assert node is not None
+    script = Path(__file__).with_name("desktop_termination.mjs")
+    result = subprocess.run(  # noqa: S603 - fixed executable and argument list
+        [node, "--experimental-vm-modules", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> None:
     source = PLUGIN.read_text(encoding="utf-8")
 
@@ -39,7 +52,12 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "digest: request.call_digest" in source
     assert "record_version: request.record_version" in source
     assert "result.resume" in source
-    assert "decision !== 'deny'" in source
+    assert "result.terminate" in source
+    assert "session.active_list" in source
+    assert "session.close" in source
+    assert "row.session_key" in source
+    assert "/termination-instruction" in source
+    assert "Ensure session stopped" in source
     assert "/resume-ack" in source
     assert "/resume-instruction" in source
     assert "Retry session wake" in source

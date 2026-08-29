@@ -2,7 +2,7 @@
 
 Durable human approval cards for consequential [Hermes Agent](https://github.com/NousResearch/hermes-agent) tool calls.
 
-Human Gate turns a tool call into a persistent decision instead of holding a live model turn open. The owner can approve, deny, or comment later. Approval and comment resume the originating Hermes session. Denial closes the request without waking the agent. An approval authorizes one exact replay of the captured call.
+Human Gate turns a tool call into a persistent decision instead of holding a live model turn open. The owner can approve, deny, or comment later. Approval and comment resume the originating Hermes session. Denial closes the request and any matching live originating session without waking the agent. An approval authorizes one exact replay of the captured call.
 
 > [!WARNING]
 > This project is under active development. It does not yet authorize live provider mutations.
@@ -20,7 +20,7 @@ Hermes Desktop shows a non-expiring card
         |
         +-- Approve -> resume session -> allow one exact replay
         +-- Comment -> resume session -> ask agent to revise
-        +-- Deny    -> terminate the request without waking the agent
+        +-- Deny    -> close the request and matching live session
 ```
 
 ## Enforcement model
@@ -37,7 +37,7 @@ Level 3 is the security target for publishing. A hook alone cannot stop a disabl
 
 - Profile-scoped SQLite state
 - Persistent Desktop approval inbox
-- Approve, deny, comment, cancel, and retry resume
+- Approve, deny, comment, cancel, retry resume, and retry session stop
 - Exact canonical call hashes and one-use claims
 - Hidden continuation into the originating stored session
 - Deterministic mock effect and publisher
