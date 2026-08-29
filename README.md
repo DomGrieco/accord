@@ -38,7 +38,7 @@ Level 3 is the security target for publishing. A hook alone cannot stop a disabl
 
 - Profile-scoped SQLite state
 - Persistent Desktop approval inbox
-- Approve, deny, comment, cancel, revoke unclaimed approval, retry resume, and retry session stop
+- Approve, deny, comment, cancel, revoke unclaimed approval, retry safe pre-dispatch resume failures, and retry session stop
 - Exact canonical call hashes and one-use claims
 - Startup recovery marks abandoned claimed effects uncertain without retrying them. A process-held runtime lock prevents a second plugin process from recovering a claim that may still be executing.
 - Hidden continuation into the originating stored session

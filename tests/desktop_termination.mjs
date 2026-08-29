@@ -115,3 +115,44 @@ await assert.rejects(
   /valid sessions array/
 )
 assert.equal(released, 3)
+
+const submitResume = plugin.namespace.submitResume
+assert.equal(typeof submitResume, 'function')
+const resume = {
+  profile: 'life',
+  stored_session_id: 'stored',
+  request_id: 'request-1',
+  prompt: 'continue'
+}
+const restCalls = []
+const ctx = {
+  rest: async (path, options) => {
+    restCalls.push({ path, options })
+    return { request: { resume_state: 'failed' } }
+  }
+}
+
+host.profileRoutes = async () => []
+await assert.rejects(submitResume(ctx, resume, 'owner-token'), /Expected one route/)
+assert.deepEqual(JSON.parse(JSON.stringify(restCalls)), [{
+  path: '/requests/request-1/resume-failed',
+  options: { method: 'POST', body: { token: 'owner-token' } }
+}])
+
+restCalls.length = 0
+host.profileRoutes = async () => [route]
+host.retainProfile = async () => {
+  throw new Error('profile unavailable')
+}
+await assert.rejects(submitResume(ctx, resume, 'owner-token'), /profile unavailable/)
+assert.equal(restCalls.length, 1)
+assert.equal(restCalls[0].path, '/requests/request-1/resume-failed')
+
+restCalls.length = 0
+host.retainProfile = async () => () => { released += 1 }
+host.requestProfile = async () => {
+  throw new Error('wake response lost')
+}
+await assert.rejects(submitResume(ctx, resume, 'owner-token'), /wake response lost/)
+assert.equal(restCalls.length, 0)
+assert.equal(released, 4)

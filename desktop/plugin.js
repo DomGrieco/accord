@@ -134,10 +134,13 @@ async function profileRoute(profile) {
   return matches[0]
 }
 
-async function submitResume(ctx, resume, token) {
-  const route = await profileRoute(resume.profile)
-  const release = await host.retainProfile(route)
+export async function submitResume(ctx, resume, token) {
+  let release
+  let wakeAttempted = false
   try {
+    const route = await profileRoute(resume.profile)
+    release = await host.retainProfile(route)
+    wakeAttempted = true
     const resumed = await host.requestProfile(route, 'session.resume', {
       session_id: resume.stored_session_id,
       profile: route.targetProfile,
@@ -160,8 +163,23 @@ async function submitResume(ctx, resume, token) {
       method: 'POST',
       body: { token }
     })
+  } catch (cause) {
+    if (!wakeAttempted) {
+      try {
+        await ctx.rest(`/requests/${resume.request_id}/resume-failed`, {
+          method: 'POST',
+          body: { token }
+        })
+      } catch (recordCause) {
+        const message = recordCause instanceof Error ? recordCause.message : String(recordCause)
+        throw new Error(`Session wake did not start, but retry state could not be recorded. ${message}`, {
+          cause
+        })
+      }
+    }
+    throw cause
   } finally {
-    release()
+    if (release) release()
   }
 }
 
