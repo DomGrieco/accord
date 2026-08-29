@@ -31,7 +31,7 @@ Control: approval binds to the canonical tool name, profile, session lineage, ef
 
 ### Duplicate clicks or concurrent retries
 
-Control: SQLite compare-and-swap transition from `approved` to `claimed`. Only one transaction wins.
+Control: SQLite compare-and-swap transition from `approved` to `claimed`. Only one transaction wins. The owned handler then consumes a shared, lock-protected, thread-bound in-process claim before dispatch. Middleware revokes all copied contexts when execution scope ends and fails closed if the owned handler returned without consuming the claim.
 
 ### Process crashes after provider mutation
 

@@ -126,14 +126,13 @@ class HumanGate:
                 "status": "approval_already_claimed",
                 "request_id": approved.id,
             }
-        claim_token = activate_claim(
-            ActiveClaim(
-                request_id=approved.id,
-                tool_name=tool_name,
-                call_digest=digest,
-                args_digest=call_digest(args),
-            )
+        active_claim = ActiveClaim(
+            request_id=approved.id,
+            tool_name=tool_name,
+            call_digest=digest,
+            args_digest=call_digest(args),
         )
+        claim_token = activate_claim(active_claim)
         try:
             result = next_call(args)
         except EffectUncertainError as exc:
@@ -165,7 +164,21 @@ class HumanGate:
                 "error": safe_error[:1000],
             }
         finally:
+            active_claim.revoke()
             reset_claim(claim_token)
+        if policy.owned_effect and not active_claim.was_consumed():
+            self.store.complete(
+                approved.id,
+                RequestState.FAILED,
+                result={"error_type": "OwnedEffectClaimNotConsumed"},
+                display={"error_type": "OwnedEffectClaimNotConsumed"},
+            )
+            return {
+                "ok": False,
+                "status": "owned_effect_claim_not_consumed",
+                "request_id": approved.id,
+                "error": "owned effect returned without consuming its approval claim",
+            }
         self.store.complete(
             approved.id,
             RequestState.EXECUTED,

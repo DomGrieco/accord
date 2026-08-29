@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
+from contextvars import copy_context
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -359,6 +360,92 @@ def test_owned_effect_executes_only_inside_approved_execution_context(tmp_path: 
     decoded = json.loads(result)
 
     assert decoded == {"effect": "demo", "message": "hello", "ok": True}
+
+
+def test_owned_effect_claim_is_consumed_by_first_matching_handler_call(
+    tmp_path: Path,
+) -> None:
+    plugin = load_plugin()
+    context = FakeContext(tmp_path)
+    plugin.register(context)
+    pre_hook = context.hooks["pre_tool_call"]
+    middleware = context.middleware["tool_execution"]
+    _schema, handler = context.tools["human_gate_demo_effect"]
+    args = {"message": "approved once"}
+
+    blocked = pre_hook(
+        tool_name="human_gate_demo_effect",
+        args=args,
+        session_id="stored-session",
+    )
+    request_id = json.loads(blocked["message"])["request_id"]
+    plugin._gate.store.decide(request_id, plugin.Decision.APPROVE, actor_id="owner")
+
+    def call_from_copied_contexts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        first_context = copy_context()
+        second_context = copy_context()
+        return [
+            json.loads(first_context.run(handler, payload)),
+            json.loads(second_context.run(handler, payload)),
+        ]
+
+    result = middleware(
+        tool_name="human_gate_demo_effect",
+        args=args,
+        session_id="stored-session",
+        next_call=call_from_copied_contexts,
+    )
+
+    assert result == [
+        {"effect": "demo", "message": "approved once", "ok": True},
+        {
+            "error": "owned effect requires an active claimed approval",
+            "ok": False,
+            "status": "human_gate_required",
+        },
+    ]
+    assert plugin._gate.store.get_request(request_id).state.value == "executed"
+    receipts = plugin._gate.store.audit_history(request_id)
+    assert [event["event_type"] for event in receipts].count("receipt") == 1
+
+
+def test_owned_effect_claim_is_revoked_when_execution_scope_returns(
+    tmp_path: Path,
+) -> None:
+    plugin = load_plugin()
+    context = FakeContext(tmp_path)
+    plugin.register(context)
+    pre_hook = context.hooks["pre_tool_call"]
+    middleware = context.middleware["tool_execution"]
+    _schema, handler = context.tools["human_gate_demo_effect"]
+    args = {"message": "do not defer"}
+
+    blocked = pre_hook(
+        tool_name="human_gate_demo_effect",
+        args=args,
+        session_id="stored-session",
+    )
+    request_id = json.loads(blocked["message"])["request_id"]
+    plugin._gate.store.decide(request_id, plugin.Decision.APPROVE, actor_id="owner")
+    delayed_contexts = []
+
+    def defer_handler(_: dict[str, Any]) -> str:
+        delayed_contexts.append(copy_context())
+        return "returned without calling the owned handler"
+
+    failed = json.loads(
+        middleware(
+            tool_name="human_gate_demo_effect",
+            args=args,
+            session_id="stored-session",
+            next_call=defer_handler,
+        )
+    )
+
+    assert failed["status"] == "owned_effect_claim_not_consumed"
+    assert plugin._gate.store.get_request(request_id).state.value == "failed"
+    delayed = json.loads(delayed_contexts[0].run(handler, args))
+    assert delayed["status"] == "human_gate_required"
 
 
 def test_approved_effect_uses_stable_lineage_after_runtime_replacement(tmp_path: Path) -> None:

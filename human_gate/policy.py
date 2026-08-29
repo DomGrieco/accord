@@ -46,6 +46,7 @@ class ToolPolicy:
     effect_kind: str
     display_fields: tuple[str, ...] = ()
     replay_fields: tuple[str, ...] = ()
+    owned_effect: bool = False
 
     def __post_init__(self) -> None:
         if not self.tool_name.strip():

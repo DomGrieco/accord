@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from .canonical import call_digest
-from .claims import require_active_claim
+from .claims import consume_active_claim
 from .store import GateStore
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -17,7 +17,7 @@ class EffectUncertainError(RuntimeError):
 
 def demo_effect_handler(args: dict[str, Any], **_: Any) -> str:
     """A deterministic owned effect used to prove the gate contract."""
-    claim = require_active_claim("human_gate_demo_effect", args)
+    claim = consume_active_claim("human_gate_demo_effect", args)
     if claim is None:
         return json.dumps(
             {
@@ -36,7 +36,7 @@ def demo_effect_handler(args: dict[str, Any], **_: Any) -> str:
 
 def mock_publish_handler(store: GateStore, args: dict[str, Any], **_: Any) -> str:
     """Run a persistent local publisher fixture behind an active one-use claim."""
-    claim = require_active_claim("human_gate_mock_publish", args)
+    claim = consume_active_claim("human_gate_mock_publish", args)
     if claim is None:
         return json.dumps(
             {

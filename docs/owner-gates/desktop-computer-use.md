@@ -4,6 +4,7 @@ Status: blocked on the macOS capture path only. Backend, policy, persistence, an
 
 ## Observed
 
+- Retried at 2026-08-29 11:00 ADT after adding one-use in-process effect claims. App discovery found the running Hermes process, but it exposed no windows. Exact Hermes capture still returned a zero by zero image with no accessibility elements. Cua Driver appeared installed but not running.
 - Retried at 2026-08-29 10:23 ADT after adding the owned mock publication path. Window discovery found Cua Driver, two Hermes windows, and the macOS Screen Recording prompt. Exact capture of the main Hermes window still returned a zero by zero image with no accessibility elements. The running packaged app exposed no Desktop development CDP endpoint on port 9222, so DOM inspection could not replace computer-use.
 - Retried at 2026-08-29 09:43 ADT after adding bounded card audit history. Exact Hermes capture still returned a zero by zero image with no accessibility elements.
 - Retried at 2026-08-29 09:29 ADT after adding safe pre-dispatch resume recovery. `list_apps` found the running Hermes process, but exact Hermes capture still returned a zero by zero image with no accessibility elements. Cua Driver appeared installed but not running in the app inventory.

@@ -206,6 +206,7 @@ def register(ctx: Any) -> None:
             effect_kind="demo",
             display_fields=("message",),
             replay_fields=("message",),
+            owned_effect=True,
         )
     )
     policies.register(
@@ -214,6 +215,7 @@ def register(ctx: Any) -> None:
             effect_kind="publish",
             display_fields=("destination", "text", "media_sha256", "simulate_outcome"),
             replay_fields=("destination", "text", "media_sha256", "simulate_outcome"),
+            owned_effect=True,
         )
     )
     store = GateStore(resolve_db_path(fallback_data_dir=ctx.state.data_dir))
