@@ -44,6 +44,26 @@ Level 3 is the security target for publishing. A hook alone cannot stop a disabl
 - X as the first optional publication adapter
 - No automatic or permanent approvals
 
+## Explicit tool policies
+
+Installing or enabling Human Gate does not gate any external write or post tool by default. The deterministic `human_gate_demo_effect` is the only built-in policy. Configure each real tool by exact name in the active profile after reviewing its argument schema:
+
+```yaml
+plugins:
+  entries:
+    human-gate:
+      settings:
+        policies:
+          - tool_name: x_create_post
+            effect_kind: publish
+            display_fields: [account, text, quote_post_id]
+            replay_fields: [account, text, quote_post_id]
+```
+
+Human Gate rejects unknown policy keys, duplicate fields, secret-bearing projection names, and replay fields the card does not display. The approval digest still covers the full original argument envelope. A changed tool, profile, session lineage, or argument cannot use an earlier approval.
+
+Hook and middleware interception cannot secure a raw effect tool if the gate can be disabled or bypassed. For a hard publication boundary, remove raw write credentials and tools from the model, and put the one-use claim check inside the owned publishing effect.
+
 Read the [v0.1 specification](docs/specs/v0.1.md), [threat model](docs/threat-model.md), and [implementation plan](docs/plans/v0.1.md).
 
 ## Status

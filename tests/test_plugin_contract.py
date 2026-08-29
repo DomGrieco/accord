@@ -10,12 +10,18 @@ from human_gate.effects import demo_effect_handler
 
 
 class FakeContext:
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, *, policies: list[dict[str, Any]] | None = None) -> None:
         self.profile_name = "life"
         self.state = SimpleNamespace(data_dir=data_dir)
         self.tools: dict[str, tuple[dict[str, Any], Any]] = {}
         self.hooks: dict[str, Any] = {}
         self.middleware: dict[str, Any] = {}
+        self._policies = policies
+
+    def get_config(self, key: str, default: Any = None) -> Any:
+        if key == "policies" and self._policies is not None:
+            return self._policies
+        return default
 
     def register_tool(self, *, name: str, schema: dict[str, Any], handler: Any, **_: Any) -> None:
         self.tools[name] = (schema, handler)
@@ -58,6 +64,20 @@ def test_plugin_registers_owned_tool_hook_and_execution_middleware(tmp_path: Pat
     assert "tool_execution" in context.middleware
 
 
+def test_external_write_tools_are_not_gated_without_explicit_policy(tmp_path: Path) -> None:
+    plugin = load_plugin()
+    context = FakeContext(tmp_path)
+    plugin.register(context)
+
+    result = context.hooks["pre_tool_call"](
+        tool_name="x_create_post",
+        args={"account": "fixture", "text": "hello"},
+        session_id="stored-session",
+    )
+
+    assert result is None
+
+
 def test_owned_effect_executes_only_inside_approved_execution_context(tmp_path: Path) -> None:
     plugin = load_plugin()
     context = FakeContext(tmp_path)
@@ -94,3 +114,34 @@ def test_owned_effect_executes_only_inside_approved_execution_context(tmp_path: 
     decoded = json.loads(result)
 
     assert decoded == {"effect": "demo", "message": "hello", "ok": True}
+
+
+def test_plugin_intercepts_only_explicitly_configured_external_write_tool(
+    tmp_path: Path,
+) -> None:
+    plugin = load_plugin()
+    context = FakeContext(
+        tmp_path,
+        policies=[
+            {
+                "tool_name": "x_create_post",
+                "effect_kind": "publish",
+                "display_fields": ["account", "text"],
+                "replay_fields": ["account", "text"],
+            }
+        ],
+    )
+    plugin.register(context)
+
+    blocked = context.hooks["pre_tool_call"](
+        tool_name="x_create_post",
+        args={"account": "fixture", "text": "hello"},
+        session_id="stored-session",
+    )
+
+    assert blocked["action"] == "block"
+    request_id = json.loads(blocked["message"])["request_id"]
+    assert plugin._gate.store.get_request(request_id).display == {
+        "account": "fixture",
+        "text": "hello",
+    }

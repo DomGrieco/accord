@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from human_gate.effects import EffectUncertainError
 from human_gate.gate import GateDecision, HumanGate
 from human_gate.models import Decision, RequestState
-from human_gate.policy import PolicyRegistry, ToolPolicy
+from human_gate.policy import PolicyRegistry, ToolPolicy, policies_from_config
 from human_gate.store import GateStore
 
 
@@ -34,6 +36,40 @@ def test_unmatched_tool_is_allowed(tmp_path: Path) -> None:
 
     assert result.decision is GateDecision.ALLOW
     assert result.request_id is None
+
+
+def test_explicit_policy_config_gates_a_post_tool_with_narrow_display_fields() -> None:
+    policies = policies_from_config(
+        [
+            {
+                "tool_name": "x_create_post",
+                "effect_kind": "publish",
+                "display_fields": ["account", "text"],
+                "replay_fields": ["account", "text"],
+            }
+        ]
+    )
+
+    policy = policies.get("x_create_post")
+
+    assert policy is not None
+    assert policy.display_projection(
+        {"account": "fixture", "text": "hello", "credential": "never persist"}
+    ) == {"account": "fixture", "text": "hello"}
+
+
+def test_policy_config_rejects_secret_bearing_projection_fields() -> None:
+    with pytest.raises(ValueError, match="secret-bearing"):
+        policies_from_config(
+            [
+                {
+                    "tool_name": "x_create_post",
+                    "effect_kind": "publish",
+                    "display_fields": ["text", "access_token"],
+                    "replay_fields": ["text"],
+                }
+            ]
+        )
 
 
 def test_first_matching_call_becomes_pending_and_is_blocked(tmp_path: Path) -> None:

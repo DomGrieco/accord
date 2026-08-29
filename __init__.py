@@ -11,7 +11,7 @@ try:
     from .human_gate.models import Decision as Decision
     from .human_gate.models import RequestRecord, RequestState
     from .human_gate.paths import resolve_db_path
-    from .human_gate.policy import PolicyRegistry, ToolPolicy
+    from .human_gate.policy import ToolPolicy, policies_from_config
     from .human_gate.schemas import DEMO_EFFECT, GET, LIST
     from .human_gate.store import GateStore
 except ImportError:  # pragma: no cover - repository-level plugin doctor import
@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - repository-level plugin doctor import
     from human_gate.models import Decision as Decision
     from human_gate.models import RequestRecord, RequestState
     from human_gate.paths import resolve_db_path
-    from human_gate.policy import PolicyRegistry, ToolPolicy
+    from human_gate.policy import ToolPolicy, policies_from_config
     from human_gate.schemas import DEMO_EFFECT, GET, LIST
     from human_gate.store import GateStore
 
@@ -168,7 +168,7 @@ def _tool_execution(
 def register(ctx: Any) -> None:
     """Register durable tools, policy hook, and execution claim middleware."""
     global _gate
-    policies = PolicyRegistry()
+    policies = policies_from_config(ctx.get_config("policies", []))
     policies.register(
         ToolPolicy(
             tool_name="human_gate_demo_effect",
