@@ -197,6 +197,8 @@ def _tool_execution(
 def register(ctx: Any) -> None:
     """Register durable tools, policy hook, and execution claim middleware."""
     global _gate
+    if _gate is not None:
+        raise RuntimeError("Human Gate runtime is already active")
     policies = policies_from_config(ctx.get_config("policies", []))
     policies.register(
         ToolPolicy(
@@ -206,8 +208,15 @@ def register(ctx: Any) -> None:
             replay_fields=("message",),
         )
     )
+    store = GateStore(resolve_db_path(fallback_data_dir=ctx.state.data_dir))
+    try:
+        store.acquire_runtime_lock()
+        store.recover_claimed_as_uncertain()
+    except Exception:
+        store.close()
+        raise
     _gate = HumanGate(
-        GateStore(resolve_db_path(fallback_data_dir=ctx.state.data_dir)),
+        store,
         policies,
         profile=str(getattr(ctx, "profile_name", "default") or "default"),
     )

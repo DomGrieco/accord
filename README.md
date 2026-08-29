@@ -40,6 +40,7 @@ Level 3 is the security target for publishing. A hook alone cannot stop a disabl
 - Persistent Desktop approval inbox
 - Approve, deny, comment, cancel, retry resume, and retry session stop
 - Exact canonical call hashes and one-use claims
+- Startup recovery marks abandoned claimed effects uncertain without retrying them. A process-held runtime lock prevents a second plugin process from recovering a claim that may still be executing.
 - Hidden continuation into the originating stored session
 - Deterministic mock effect and publisher
 - X as the first optional publication adapter

@@ -22,6 +22,20 @@ def create_request(store: GateStore, *, digest: str = "digest-a"):
     )
 
 
+def test_runtime_lock_prevents_concurrent_recovery_owner(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    first = GateStore(path)
+    second = GateStore(path)
+    first.acquire_runtime_lock()
+
+    with pytest.raises(RuntimeError, match="already active"):
+        second.acquire_runtime_lock()
+
+    first.close()
+    second.acquire_runtime_lock()
+    second.close()
+
+
 def test_pending_request_persists_across_store_reopen(tmp_path: Path) -> None:
     path = tmp_path / "gate.db"
     first = GateStore(path)

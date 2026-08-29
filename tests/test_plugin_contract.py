@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -70,6 +71,132 @@ def test_plugin_registers_owned_tool_hook_and_execution_middleware(tmp_path: Pat
     assert "human_gate_demo_effect" in context.tools
     assert "pre_tool_call" in context.hooks
     assert "tool_execution" in context.middleware
+
+
+def test_plugin_startup_does_not_recover_claim_owned_by_live_runtime(tmp_path: Path) -> None:
+    first_plugin = load_plugin()
+    first_context = FakeContext(tmp_path)
+    first_plugin.register(first_context)
+    args = {"message": "hello"}
+
+    blocked = first_context.hooks["pre_tool_call"](
+        tool_name="human_gate_demo_effect",
+        args=args,
+        session_id="stored-session",
+    )
+    request_id = json.loads(blocked["message"])["request_id"]
+    request = first_plugin._gate.store.get_request(request_id)
+    assert request is not None
+    first_plugin._gate.store.decide(
+        request_id,
+        first_plugin.Decision.APPROVE,
+        actor_id="owner",
+    )
+    assert first_plugin._gate.store.claim(
+        request_id,
+        expected_digest=request.call_digest,
+    )
+
+    same_runtime_context = FakeContext(tmp_path)
+    with pytest.raises(RuntimeError, match="already active"):
+        first_plugin.register(same_runtime_context)
+    assert same_runtime_context.tools == {}
+    assert same_runtime_context.hooks == {}
+    assert same_runtime_context.middleware == {}
+    assert first_plugin._gate.store.get_request(request_id).state is first_plugin.RequestState.CLAIMED
+
+    second_plugin = load_plugin()
+    second_context = FakeContext(tmp_path)
+    with pytest.raises(RuntimeError, match="already active"):
+        second_plugin.register(second_context)
+
+    assert second_plugin._gate is None
+    assert second_context.tools == {}
+    assert second_context.hooks == {}
+    assert second_context.middleware == {}
+    assert first_plugin._gate.store.get_request(request_id).state is first_plugin.RequestState.CLAIMED
+    first_plugin._gate.store.close()
+
+
+def test_plugin_startup_recovers_abandoned_claim_as_uncertain(tmp_path: Path) -> None:
+    first_plugin = load_plugin()
+    first_context = FakeContext(tmp_path)
+    first_plugin.register(first_context)
+    args = {"message": "hello"}
+
+    blocked = first_context.hooks["pre_tool_call"](
+        tool_name="human_gate_demo_effect",
+        args=args,
+        session_id="stored-session",
+    )
+    request_id = json.loads(blocked["message"])["request_id"]
+    request = first_plugin._gate.store.get_request(request_id)
+    assert request is not None
+    first_plugin._gate.store.decide(
+        request_id,
+        first_plugin.Decision.APPROVE,
+        actor_id="owner",
+    )
+    assert first_plugin._gate.store.claim(
+        request_id,
+        expected_digest=request.call_digest,
+    )
+    first_plugin._gate.store.close()
+
+    restarted_plugin = load_plugin()
+    restarted_context = FakeContext(tmp_path)
+    restarted_plugin.register(restarted_context)
+
+    recovered = restarted_plugin._gate.store.get_request(request_id)
+    assert recovered is not None
+    assert recovered.state is restarted_plugin.RequestState.UNCERTAIN
+    with sqlite3.connect(tmp_path / "approvals.db") as connection:
+        receipts = connection.execute(
+            "SELECT outcome FROM receipts WHERE request_id = ?",
+            (request_id,),
+        ).fetchall()
+    assert receipts == [("uncertain",)]
+
+    restarted_plugin._gate.store.close()
+    second_restart_plugin = load_plugin()
+    second_restart_context = FakeContext(tmp_path)
+    second_restart_plugin.register(second_restart_context)
+    with sqlite3.connect(tmp_path / "approvals.db") as connection:
+        receipts_after_second_restart = connection.execute(
+            "SELECT outcome FROM receipts WHERE request_id = ?",
+            (request_id,),
+        ).fetchall()
+    assert receipts_after_second_restart == [("uncertain",)]
+
+    replay = second_restart_context.hooks["pre_tool_call"](
+        tool_name="human_gate_demo_effect",
+        args=args,
+        session_id="stored-session",
+    )
+    replay_id = json.loads(replay["message"])["request_id"]
+    assert replay_id != request_id
+    assert second_restart_plugin._gate.store.get_request(replay_id).state.value == "pending"
+
+
+def test_plugin_startup_fails_closed_when_claim_recovery_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = load_plugin()
+    context = FakeContext(tmp_path)
+
+    def fail_recovery(_store: Any) -> int:
+        raise RuntimeError("recovery failed")
+
+    monkeypatch.setattr(plugin.GateStore, "recover_claimed_as_uncertain", fail_recovery)
+
+    with pytest.raises(RuntimeError, match="recovery failed"):
+        plugin.register(context)
+
+    assert plugin._gate is None
+    assert context.tools == {}
+    assert context.hooks == {}
+    assert context.middleware == {}
 
 
 def test_configured_tool_fails_closed_without_session_identity(tmp_path: Path) -> None:

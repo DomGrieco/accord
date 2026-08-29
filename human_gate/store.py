@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, cast
 
 from .canonical import call_digest, canonical_json
 from .models import Decision, RequestRecord, RequestState, ResumeState
@@ -30,9 +31,44 @@ def _bounded_json(value: dict[str, Any], *, field: str) -> str:
     return encoded
 
 
+def _lock_runtime_file(handle: BinaryIO) -> None:
+    handle.seek(0)
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        import msvcrt
+
+        windows_lock = cast(Any, msvcrt)
+        try:
+            windows_lock.locking(handle.fileno(), windows_lock.LK_NBLCK, 1)
+        except OSError as exc:
+            raise RuntimeError("Human Gate runtime is already active") from exc
+        return
+
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        raise RuntimeError("Human Gate runtime is already active") from exc
+
+
+def _unlock_runtime_file(handle: BinaryIO) -> None:
+    handle.seek(0)
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        import msvcrt
+
+        windows_lock = cast(Any, msvcrt)
+        windows_lock.locking(handle.fileno(), windows_lock.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class GateStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
+        self._runtime_lock: BinaryIO | None = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(
             self.path,
@@ -46,8 +82,33 @@ class GateStore:
         self._connection.execute("PRAGMA busy_timeout = 5000")
         self._initialize()
 
+    def acquire_runtime_lock(self) -> None:
+        if self._runtime_lock is not None:
+            return
+        lock_path = self.path.with_name(f"{self.path.name}.runtime.lock")
+        handle = lock_path.open("a+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            _lock_runtime_file(handle)
+        except Exception:
+            handle.close()
+            raise
+        self._runtime_lock = handle
+
     def close(self) -> None:
-        self._connection.close()
+        try:
+            self._connection.close()
+        finally:
+            if self._runtime_lock is not None:
+                handle = self._runtime_lock
+                self._runtime_lock = None
+                try:
+                    _unlock_runtime_file(handle)
+                finally:
+                    handle.close()
 
     def _initialize(self) -> None:
         self._connection.executescript(
