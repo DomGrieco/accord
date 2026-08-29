@@ -37,6 +37,10 @@ Control: SQLite compare-and-swap transition from `approved` to `claimed`. Only o
 
 Control: claim before dispatch. Startup recovery changes abandoned `claimed` requests to `uncertain`. Never retry automatically.
 
+### Provider call raises after claim
+
+Control: an unclassified exception after claim becomes `uncertain`, since dispatch may have happened. An adapter may report a definitive failure only when it proves dispatch did not begin.
+
 ### Comment accidentally approves
 
 Control: comment transitions only to `changes_requested`. The transition table has no path from comment to `approved` or `claimed`.

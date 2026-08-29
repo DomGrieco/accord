@@ -15,6 +15,10 @@ class EffectUncertainError(RuntimeError):
     """Raised when an external effect may have occurred but cannot be verified."""
 
 
+class EffectDefinitiveFailureError(RuntimeError):
+    """Raised when an effect adapter proves that dispatch did not begin."""
+
+
 def demo_effect_handler(args: dict[str, Any], **_: Any) -> str:
     """A deterministic owned effect used to prove the gate contract."""
     claim = consume_active_claim("human_gate_demo_effect", args)
@@ -64,7 +68,9 @@ def mock_publish_handler(store: GateStore, args: dict[str, Any], **_: Any) -> st
     if simulate_outcome not in {"success", "failed", "uncertain"}:
         raise ValueError("simulate_outcome is invalid")
     if simulate_outcome == "failed":
-        raise RuntimeError("mock publisher rejected the fixture before dispatch")
+        raise EffectDefinitiveFailureError(
+            "mock publisher rejected the fixture before dispatch"
+        )
     payload_digest = call_digest(
         {
             "schema": "hermes.human-gate.publish.v1",

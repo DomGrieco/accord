@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from human_gate.effects import EffectUncertainError
+from human_gate.effects import EffectDefinitiveFailureError, EffectUncertainError
 from human_gate.gate import GateDecision, HumanGate
 from human_gate.models import Decision, RequestState
 from human_gate.policy import PolicyRegistry, ToolPolicy, policies_from_config
@@ -175,7 +175,9 @@ def test_executor_exception_records_failed_without_retry(tmp_path: Path) -> None
     replay_only_secret = "REPLAY_ONLY_SECRET"
 
     def fail(_args: dict):
-        raise RuntimeError(f"provider rejected payload={replay_only_secret}")
+        raise EffectDefinitiveFailureError(
+            f"provider rejected payload={replay_only_secret}"
+        )
 
     result = gate.execute(
         "x_create_post",
@@ -203,6 +205,53 @@ def test_executor_exception_records_failed_without_retry(tmp_path: Path) -> None
         "result_digest": history[-1]["result_digest"],
         "created_at": history[-1]["created_at"],
     }
+
+
+def test_unclassified_exception_after_dispatch_is_uncertain(tmp_path: Path) -> None:
+    gate = build_gate(tmp_path)
+    args = {"text": "hello", "quote_post_id": None}
+    pending = gate.intercept(
+        "x_create_post",
+        args,
+        session_id="runtime",
+        session_lineage="stored",
+    )
+    assert pending.request_id is not None
+    gate.store.decide(pending.request_id, Decision.APPROVE, actor_id="owner")
+    effects: list[dict] = []
+    secret = "RESPONSE_LOSS_SECRET"
+
+    def lose_response(dispatched_args: dict) -> None:
+        effects.append(dispatched_args)
+        raise TimeoutError(f"response lost after dispatch: {secret}")
+
+    result = gate.execute(
+        "x_create_post",
+        args,
+        session_id="runtime-2",
+        session_lineage="stored",
+        next_call=lose_response,
+    )
+
+    assert effects == [args]
+    assert result["ok"] is False
+    assert result["status"] == "uncertain"
+    assert secret not in str(result)
+    request = gate.store.get_request(pending.request_id)
+    assert request is not None
+    assert request.state is RequestState.UNCERTAIN
+    assert gate.store.find_matching_approved(
+        profile="life",
+        session_lineage="stored",
+        tool_name="x_create_post",
+        call_digest=request.call_digest,
+    ) is None
+    with sqlite3.connect(tmp_path / "gate.db") as connection:
+        persisted_display = connection.execute(
+            "SELECT display_json FROM receipts WHERE request_id = ?",
+            (pending.request_id,),
+        ).fetchone()[0]
+    assert secret not in persisted_display
 
 
 def test_uncertain_effect_never_reuses_the_approval(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 from .canonical import call_digest
 from .claims import ActiveClaim, activate_claim, reset_claim
-from .effects import EffectUncertainError
+from .effects import EffectDefinitiveFailureError
 from .models import RequestState
 from .policy import PolicyRegistry, ToolPolicy
 from .store import GateStore
@@ -135,7 +135,21 @@ class HumanGate:
         claim_token = activate_claim(active_claim)
         try:
             result = next_call(args)
-        except EffectUncertainError as exc:
+        except EffectDefinitiveFailureError as exc:
+            safe_error = f"{type(exc).__name__}: effect failed before dispatch"
+            self.store.complete(
+                approved.id,
+                RequestState.FAILED,
+                result={"error_type": type(exc).__name__},
+                display={"error_type": type(exc).__name__},
+            )
+            return {
+                "ok": False,
+                "status": "failed",
+                "request_id": approved.id,
+                "error": safe_error,
+            }
+        except Exception as exc:
             safe_error = f"{type(exc).__name__}: effect outcome could not be verified"
             self.store.complete(
                 approved.id,
@@ -146,20 +160,6 @@ class HumanGate:
             return {
                 "ok": False,
                 "status": "uncertain",
-                "request_id": approved.id,
-                "error": safe_error,
-            }
-        except Exception as exc:
-            safe_error = f"{type(exc).__name__}: effect failed"
-            self.store.complete(
-                approved.id,
-                RequestState.FAILED,
-                result={"error_type": type(exc).__name__},
-                display={"error_type": type(exc).__name__},
-            )
-            return {
-                "ok": False,
-                "status": "failed",
                 "request_id": approved.id,
                 "error": safe_error[:1000],
             }
