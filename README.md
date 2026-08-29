@@ -42,13 +42,13 @@ Level 3 is the security target for publishing. A hook alone cannot stop a disabl
 - Exact canonical call hashes and one-use claims
 - Startup recovery marks abandoned claimed effects uncertain without retrying them. A process-held runtime lock prevents a second plugin process from recovering a claim that may still be executing.
 - Hidden continuation into the originating stored session
-- Deterministic mock effect and publisher
+- Deterministic mock effect and persistent idempotent mock publisher
 - X as the first optional publication adapter
 - No automatic or permanent approvals
 
 ## Explicit tool policies
 
-Installing or enabling Human Gate does not gate any external write or post tool by default. The deterministic `human_gate_demo_effect` is the only built-in policy. Configure each real tool by exact name in the active profile after reviewing its argument schema:
+Installing or enabling Human Gate does not gate any external write or post tool by default. The built-in `human_gate_demo_effect` and `human_gate_mock_publish` tools are local fixtures and never contact a provider. Configure each real tool by exact name in the active profile after reviewing its argument schema:
 
 ```yaml
 plugins:
@@ -63,6 +63,8 @@ plugins:
 ```
 
 Human Gate rejects unknown policy keys, duplicate fields, secret-bearing projection names, and replay fields the card does not display. The approval digest still covers the full original argument envelope. A changed tool, profile, stable session lineage, or argument cannot use an earlier approval. When Hermes supplies a stable `session_key`, the plugin persists it as both the resume target and approval lineage. Configured tools fail closed if Hermes supplies no session identity.
+
+`human_gate_mock_publish` proves the owned publication path without a network call. Its exact approval envelope includes a mock destination, text, up to four media SHA-256 digests, an opaque idempotency key, and a test outcome. The publisher stores only hashes and a synthetic provider id. A response-loss fixture becomes `uncertain`; a newly approved retry with the same key returns the first synthetic result instead of creating a second publication. The X adapter remains disabled and no live posting tool is registered.
 
 Cold resume across a replaced agent runtime still needs Hermes to pass its stable stored session key into tool hooks and middleware. The current host integration gate is recorded in [the stable session lineage owner note](docs/owner-gates/stable-session-lineage.md).
 

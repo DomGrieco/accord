@@ -6,22 +6,22 @@ import json
 from typing import Any
 
 try:
-    from .human_gate.effects import demo_effect_handler
+    from .human_gate.effects import demo_effect_handler, mock_publish_handler
     from .human_gate.gate import GateDecision, HumanGate
     from .human_gate.models import Decision as Decision
     from .human_gate.models import RequestRecord, RequestState
     from .human_gate.paths import resolve_db_path
     from .human_gate.policy import ToolPolicy, policies_from_config
-    from .human_gate.schemas import DEMO_EFFECT, GET, LIST
+    from .human_gate.schemas import DEMO_EFFECT, GET, LIST, MOCK_PUBLISH
     from .human_gate.store import GateStore
 except ImportError:  # pragma: no cover - repository-level plugin doctor import
-    from human_gate.effects import demo_effect_handler
+    from human_gate.effects import demo_effect_handler, mock_publish_handler
     from human_gate.gate import GateDecision, HumanGate
     from human_gate.models import Decision as Decision
     from human_gate.models import RequestRecord, RequestState
     from human_gate.paths import resolve_db_path
     from human_gate.policy import ToolPolicy, policies_from_config
-    from human_gate.schemas import DEMO_EFFECT, GET, LIST
+    from human_gate.schemas import DEMO_EFFECT, GET, LIST, MOCK_PUBLISH
     from human_gate.store import GateStore
 
 _gate: HumanGate | None = None
@@ -208,6 +208,14 @@ def register(ctx: Any) -> None:
             replay_fields=("message",),
         )
     )
+    policies.register(
+        ToolPolicy(
+            tool_name="human_gate_mock_publish",
+            effect_kind="publish",
+            display_fields=("destination", "text", "media_sha256", "simulate_outcome"),
+            replay_fields=("destination", "text", "media_sha256", "simulate_outcome"),
+        )
+    )
     store = GateStore(resolve_db_path(fallback_data_dir=ctx.state.data_dir))
     try:
         store.acquire_runtime_lock()
@@ -239,6 +247,13 @@ def register(ctx: Any) -> None:
         toolset="human_gate",
         schema=DEMO_EFFECT,
         handler=demo_effect_handler,
+        emoji="✋",
+    )
+    ctx.register_tool(
+        name="human_gate_mock_publish",
+        toolset="human_gate",
+        schema=MOCK_PUBLISH,
+        handler=lambda args, **kwargs: mock_publish_handler(store, args, **kwargs),
         emoji="✋",
     )
     ctx.register_hook("pre_tool_call", _pre_tool_call)

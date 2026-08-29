@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Barrier, Lock, Thread
+from threading import Barrier, Event, Lock, Thread
 
 import pytest
 
@@ -34,6 +34,81 @@ def test_runtime_lock_prevents_concurrent_recovery_owner(tmp_path: Path) -> None
     first.close()
     second.acquire_runtime_lock()
     second.close()
+
+
+def test_mock_publication_idempotency_persists_only_digests(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    store = GateStore(path)
+    key = "private-idempotency-key"
+    payload_digest = "a" * 64
+
+    first = store.record_mock_publication(key, payload_digest)
+    replay = store.record_mock_publication(key, payload_digest)
+
+    assert first.created is True
+    assert replay.created is False
+    assert replay.provider_id == first.provider_id
+    raw = path.read_bytes()
+    assert key.encode() not in raw
+
+
+def test_mock_publication_rejects_idempotency_key_reuse_for_changed_payload(
+    tmp_path: Path,
+) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    store.record_mock_publication("same-key", "a" * 64)
+
+    with pytest.raises(ConflictError, match="different payload"):
+        store.record_mock_publication("same-key", "b" * 64)
+
+
+def test_mock_publication_idempotency_is_atomic_under_concurrency(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    GateStore(path).close()
+    barrier = Barrier(3)
+    lock = Lock()
+    outcomes: list[tuple[bool, str]] = []
+
+    def publish() -> None:
+        store = GateStore(path)
+        barrier.wait()
+        result = store.record_mock_publication("same-key", "a" * 64)
+        with lock:
+            outcomes.append((result.created, result.provider_id))
+        store.close()
+
+    workers = [Thread(target=publish), Thread(target=publish)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(created for created, _provider_id in outcomes) == [False, True]
+    assert len({provider_id for _created, provider_id in outcomes}) == 1
+    store = GateStore(path)
+    assert store.count_mock_publications() == 1
+
+
+def test_same_store_serializes_connection_access(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    entered = Event()
+    finished = Event()
+
+    def publish() -> None:
+        entered.set()
+        store.record_mock_publication("same-key", "a" * 64)
+        finished.set()
+
+    with store._connection_lock:
+        worker = Thread(target=publish)
+        worker.start()
+        assert entered.wait(timeout=1)
+        assert finished.wait(timeout=0.05) is False
+    worker.join(timeout=1)
+
+    assert finished.is_set()
+    assert store.count_mock_publications() == 1
 
 
 def test_audit_history_orders_safe_decisions_and_receipts(tmp_path: Path) -> None:
@@ -158,12 +233,15 @@ def test_approved_request_can_be_cancelled_before_claim(tmp_path: Path) -> None:
     )
 
     assert cancelled.state is RequestState.CANCELLED
-    assert store.find_matching_approved(
-        profile="life",
-        session_lineage="session-stored",
-        tool_name="x_create_post",
-        call_digest="digest-a",
-    ) is None
+    assert (
+        store.find_matching_approved(
+            profile="life",
+            session_lineage="session-stored",
+            tool_name="x_create_post",
+            call_digest="digest-a",
+        )
+        is None
+    )
     assert store.claim(request.id, expected_digest="digest-a") is False
 
 

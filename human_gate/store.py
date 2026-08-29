@@ -5,9 +5,13 @@ import hmac
 import os
 import sqlite3
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from threading import RLock
+from typing import Any, BinaryIO, TypeVar, cast
 
 from .canonical import call_digest, canonical_json
 from .models import Decision, RequestRecord, RequestState, ResumeState
@@ -18,6 +22,24 @@ _MAX_PROJECTION_BYTES = 256 * 1024
 
 class ConflictError(RuntimeError):
     """Raised when a requested state transition is no longer valid."""
+
+
+@dataclass(frozen=True)
+class MockPublication:
+    provider_id: str
+    created: bool
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _serialized(method: _F) -> _F:
+    @wraps(method)
+    def wrapper(self: GateStore, *args: Any, **kwargs: Any) -> Any:
+        with self._connection_lock:
+            return method(self, *args, **kwargs)
+
+    return cast(_F, wrapper)
 
 
 def _now() -> str:
@@ -69,6 +91,7 @@ class GateStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
         self._runtime_lock: BinaryIO | None = None
+        self._connection_lock = RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(
             self.path,
@@ -82,6 +105,7 @@ class GateStore:
         self._connection.execute("PRAGMA busy_timeout = 5000")
         self._initialize()
 
+    @_serialized
     def acquire_runtime_lock(self) -> None:
         if self._runtime_lock is not None:
             return
@@ -98,6 +122,7 @@ class GateStore:
             raise
         self._runtime_lock = handle
 
+    @_serialized
     def close(self) -> None:
         try:
             self._connection.close()
@@ -110,6 +135,7 @@ class GateStore:
                 finally:
                     handle.close()
 
+    @_serialized
     def _initialize(self) -> None:
         self._connection.executescript(
             """
@@ -171,6 +197,13 @@ class GateStore:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS mock_publications (
+                idempotency_digest TEXT PRIMARY KEY,
+                payload_digest TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         columns = {
@@ -182,12 +215,68 @@ class GateStore:
                 "ALTER TABLE requests ADD COLUMN record_version INTEGER NOT NULL DEFAULT 1"
             )
 
+    @_serialized
+    def record_mock_publication(self, idempotency_key: str, payload_digest: str) -> MockPublication:
+        """Record one local mock publish without persisting content or the opaque key."""
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 256:
+            raise ValueError("idempotency_key must contain 1 to 256 characters")
+        if (
+            not isinstance(payload_digest, str)
+            or len(payload_digest) != 64
+            or any(character not in "0123456789abcdef" for character in payload_digest)
+        ):
+            raise ValueError("payload_digest must be a lowercase SHA-256 digest")
+        idempotency_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+        provider_id = (
+            "mock_"
+            + hashlib.sha256(f"{idempotency_digest}:{payload_digest}".encode("ascii")).hexdigest()[
+                :24
+            ]
+        )
+        now = _now()
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                "SELECT payload_digest, provider_id FROM mock_publications "
+                "WHERE idempotency_digest = ?",
+                (idempotency_digest,),
+            ).fetchone()
+            if existing is not None:
+                if not hmac.compare_digest(str(existing["payload_digest"]), payload_digest):
+                    raise ConflictError(
+                        "mock publication idempotency key was used for a different payload"
+                    )
+                self._connection.execute("COMMIT")
+                return MockPublication(provider_id=str(existing["provider_id"]), created=False)
+            self._connection.execute(
+                """
+                INSERT INTO mock_publications(
+                    idempotency_digest, payload_digest, provider_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (idempotency_digest, payload_digest, provider_id, now),
+            )
+            self._connection.execute("COMMIT")
+            return MockPublication(provider_id=provider_id, created=True)
+        except Exception:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+
+    @_serialized
+    def count_mock_publications(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) AS count FROM mock_publications").fetchone()
+        if row is None:
+            raise RuntimeError("mock publication count was unavailable")
+        return int(row["count"])
+
     @staticmethod
     def _owner_token_digest(token: str) -> str:
         if len(token) < 32:
             raise ValueError("owner token must contain at least 32 characters")
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
+    @_serialized
     def register_owner_token(self, token: str) -> bool:
         digest = self._owner_token_digest(token)
         now = _now()
@@ -210,6 +299,7 @@ class GateStore:
                 self._connection.execute("ROLLBACK")
             raise
 
+    @_serialized
     def verify_owner_token(self, token: str) -> bool:
         try:
             digest = self._owner_token_digest(token)
@@ -248,17 +338,17 @@ class GateStore:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             claimed_at=str(row["claimed_at"]) if row["claimed_at"] is not None else None,
-            completed_at=(
-                str(row["completed_at"]) if row["completed_at"] is not None else None
-            ),
+            completed_at=(str(row["completed_at"]) if row["completed_at"] is not None else None),
         )
 
+    @_serialized
     def get_request(self, request_id: str) -> RequestRecord | None:
         row = self._connection.execute(
             "SELECT * FROM requests WHERE id = ?", (request_id,)
         ).fetchone()
         return self._record(row)
 
+    @_serialized
     def list_requests(
         self,
         *,
@@ -279,6 +369,7 @@ class GateStore:
             ).fetchall()
         return [record for row in rows if (record := self._record(row)) is not None]
 
+    @_serialized
     def create_or_get_pending(
         self,
         *,
@@ -350,6 +441,7 @@ class GateStore:
             raise RuntimeError("pending request was not persisted")
         return record
 
+    @_serialized
     def find_matching_approved(
         self,
         *,
@@ -369,6 +461,7 @@ class GateStore:
         ).fetchone()
         return self._record(row)
 
+    @_serialized
     def decide(
         self,
         request_id: str,
@@ -448,6 +541,7 @@ class GateStore:
             raise RuntimeError("decided request disappeared")
         return record
 
+    @_serialized
     def mark_resume_delivered(self, request_id: str) -> RequestRecord:
         now = _now()
         updated = self._connection.execute(
@@ -469,6 +563,7 @@ class GateStore:
             raise RuntimeError("resumed request disappeared")
         return record
 
+    @_serialized
     def mark_resume_failed(self, request_id: str) -> RequestRecord:
         now = _now()
         updated = self._connection.execute(
@@ -490,6 +585,7 @@ class GateStore:
             raise RuntimeError("failed-resume request disappeared")
         return record
 
+    @_serialized
     def begin_resume_delivery(self, request_id: str) -> RequestRecord:
         now = _now()
         try:
@@ -516,6 +612,7 @@ class GateStore:
             raise RuntimeError("resume delivery request disappeared")
         return record
 
+    @_serialized
     def latest_decision(self, request_id: str) -> tuple[Decision, str] | None:
         row = self._connection.execute(
             """
@@ -528,18 +625,18 @@ class GateStore:
             return None
         return Decision(str(row["decision"])), str(row["comment"])
 
+    @_serialized
     def audit_history(self, request_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.audit_history_for_requests([request_id], limit=limit)[request_id]
 
+    @_serialized
     def audit_history_for_requests(
         self, request_ids: list[str], *, limit: int = 100
     ) -> dict[str, list[dict[str, Any]]]:
         unique_ids = list(dict.fromkeys(request_ids))
         if len(unique_ids) > 500:
             raise ValueError("audit history supports at most 500 requests")
-        histories: dict[str, list[dict[str, Any]]] = {
-            request_id: [] for request_id in unique_ids
-        }
+        histories: dict[str, list[dict[str, Any]]] = {request_id: [] for request_id in unique_ids}
         if not unique_ids:
             return histories
         bounded_limit = max(1, min(limit, 500))
@@ -585,6 +682,7 @@ class GateStore:
             histories[request_id] = events[:bounded_limit]
         return histories
 
+    @_serialized
     def claim(self, request_id: str, *, expected_digest: str) -> bool:
         now = _now()
         try:
@@ -604,6 +702,7 @@ class GateStore:
                 self._connection.execute("ROLLBACK")
             raise
 
+    @_serialized
     def complete(
         self,
         request_id: str,
@@ -646,6 +745,7 @@ class GateStore:
             raise RuntimeError("completed request disappeared")
         return record
 
+    @_serialized
     def set_resume_state(self, request_id: str, state: ResumeState) -> RequestRecord:
         now = _now()
         updated = self._connection.execute(
@@ -659,6 +759,7 @@ class GateStore:
             raise RuntimeError("request disappeared after resume update")
         return record
 
+    @_serialized
     def recover_claimed_as_uncertain(self) -> int:
         now = _now()
         try:

@@ -44,3 +44,24 @@ DEMO_EFFECT = _schema(
     {"message": {"type": "string", "minLength": 1, "maxLength": 1000}},
     required=["message"],
 )
+
+MOCK_PUBLISH = _schema(
+    "human_gate_mock_publish",
+    "Run a local idempotent publication fixture. It never contacts a provider. Human Gate blocks the first call until the owner approves the exact payload.",
+    {
+        "destination": {"type": "string", "enum": ["mock"]},
+        "text": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "media_sha256": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "maxItems": 4,
+        },
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+        "simulate_outcome": {
+            "type": "string",
+            "enum": ["success", "failed", "uncertain"],
+            "default": "success",
+        },
+    },
+    required=["destination", "text", "media_sha256", "idempotency_key"],
+)
