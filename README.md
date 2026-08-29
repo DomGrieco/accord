@@ -60,7 +60,9 @@ plugins:
             replay_fields: [account, text, quote_post_id]
 ```
 
-Human Gate rejects unknown policy keys, duplicate fields, secret-bearing projection names, and replay fields the card does not display. The approval digest still covers the full original argument envelope. A changed tool, profile, session lineage, or argument cannot use an earlier approval.
+Human Gate rejects unknown policy keys, duplicate fields, secret-bearing projection names, and replay fields the card does not display. The approval digest still covers the full original argument envelope. A changed tool, profile, stable session lineage, or argument cannot use an earlier approval. When Hermes supplies a stable `session_key`, the plugin persists it as both the resume target and approval lineage. Configured tools fail closed if Hermes supplies no session identity.
+
+Cold resume across a replaced agent runtime still needs Hermes to pass its stable stored session key into tool hooks and middleware. The current host integration gate is recorded in [the stable session lineage owner note](docs/owner-gates/stable-session-lineage.md).
 
 Hook and middleware interception cannot secure a raw effect tool if the gate can be disabled or bypassed. For a hard publication boundary, remove raw write credentials and tools from the model, and put the one-use claim check inside the owned publishing effect.
 

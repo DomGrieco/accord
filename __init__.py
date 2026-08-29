@@ -80,9 +80,21 @@ def _get_handler(args: dict[str, Any], **_: Any) -> str:
     return json.dumps({"ok": True, "request": _request_payload(record)}, sort_keys=True)
 
 
-def _session_lineage(session_id: str) -> str:
-    normalized = str(session_id or "").strip()
-    return normalized or "unroutable-session"
+def _session_identity(*, session_id: str, session_key: str) -> str | None:
+    """Return the stable stored-session identity when Hermes provides one."""
+    stable = str(session_key or "").strip()
+    if stable:
+        return stable
+    runtime_or_legacy = str(session_id or "").strip()
+    return runtime_or_legacy or None
+
+
+def _unroutable_payload(tool_name: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "human_gate_unroutable",
+        "tool_name": tool_name,
+    }
 
 
 def _pre_tool_call(
@@ -90,18 +102,28 @@ def _pre_tool_call(
     args: dict[str, Any] | None = None,
     *,
     session_id: str = "",
+    session_key: str = "",
     **_: Any,
 ) -> dict[str, str] | None:
     gate = _require_gate()
     values = dict(args) if isinstance(args, dict) else {}
     if gate.policies.get(tool_name) is None:
         return None
+    stable_session_id = _session_identity(
+        session_id=session_id,
+        session_key=session_key,
+    )
+    if stable_session_id is None:
+        return {
+            "action": "block",
+            "message": json.dumps(_unroutable_payload(tool_name), sort_keys=True),
+        }
     try:
         result = gate.intercept(
             tool_name,
             values,
-            session_id=session_id,
-            session_lineage=_session_lineage(session_id),
+            session_id=stable_session_id,
+            session_lineage=stable_session_id,
         )
     except Exception as exc:
         return {
@@ -137,18 +159,25 @@ def _tool_execution(
     *,
     next_call: Any,
     session_id: str = "",
+    session_key: str = "",
     **_: Any,
 ) -> Any:
     gate = _require_gate()
     values = dict(args) if isinstance(args, dict) else {}
     if gate.policies.get(tool_name) is None:
         return next_call(values)
+    stable_session_id = _session_identity(
+        session_id=session_id,
+        session_key=session_key,
+    )
+    if stable_session_id is None:
+        return json.dumps(_unroutable_payload(tool_name), sort_keys=True)
     try:
         result = gate.execute(
             tool_name,
             values,
-            session_id=session_id,
-            session_lineage=_session_lineage(session_id),
+            session_id=stable_session_id,
+            session_lineage=stable_session_id,
             next_call=next_call,
         )
     except Exception as exc:
