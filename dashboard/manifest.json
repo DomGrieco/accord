@@ -1,0 +1,8 @@
+{
+  "name": "human-gate",
+  "label": "Human Gate",
+  "description": "Durable owner decisions for consequential tool calls",
+  "icon": "ShieldCheck",
+  "version": "0.1.0.dev0",
+  "api": "plugin_api.py"
+}

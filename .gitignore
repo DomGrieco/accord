@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local plugin state
+*.db
+*.db-shm
+*.db-wal
+.env

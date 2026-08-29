@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+from pathlib import Path
+from threading import Barrier, Lock, Thread
+
+import pytest
+
+from human_gate.models import Decision, RequestState
+from human_gate.store import ConflictError, GateStore
+
+
+def create_request(store: GateStore, *, digest: str = "digest-a"):
+    return store.create_or_get_pending(
+        profile="life",
+        session_id="session-runtime",
+        session_lineage="session-stored",
+        tool_name="x_create_post",
+        effect_kind="publish",
+        call_digest=digest,
+        display={"text": "hello"},
+        replay={"text": "hello"},
+    )
+
+
+def test_pending_request_persists_across_store_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    first = GateStore(path)
+    request = create_request(first)
+    first.close()
+
+    second = GateStore(path)
+    restored = second.get_request(request.id)
+
+    assert restored is not None
+    assert restored.state is RequestState.PENDING
+    assert restored.display == {"text": "hello"}
+    assert restored.call_digest == "digest-a"
+
+
+def test_equivalent_pending_request_is_reused(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+
+    first = create_request(store)
+    second = create_request(store)
+
+    assert second.id == first.id
+
+
+def test_approve_can_be_claimed_exactly_once_under_concurrency(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    setup = GateStore(path)
+    request = create_request(setup)
+    setup.decide(request.id, Decision.APPROVE, actor_id="owner")
+    setup.close()
+
+    barrier = Barrier(3)
+    lock = Lock()
+    outcomes: list[bool] = []
+
+    def claim() -> None:
+        store = GateStore(path)
+        barrier.wait()
+        outcome = store.claim(request.id, expected_digest="digest-a")
+        with lock:
+            outcomes.append(outcome)
+        store.close()
+
+    workers = [Thread(target=claim), Thread(target=claim)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(outcomes) == [False, True]
+    final = GateStore(path).get_request(request.id)
+    assert final is not None
+    assert final.state is RequestState.CLAIMED
+
+
+def test_claim_rejects_digest_mismatch(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    store.decide(request.id, Decision.APPROVE, actor_id="owner")
+
+    assert store.claim(request.id, expected_digest="different") is False
+    assert store.get_request(request.id).state is RequestState.APPROVED
+
+
+def test_comment_and_deny_never_create_execution_authority(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    commented = create_request(store, digest="commented")
+    denied = create_request(store, digest="denied")
+
+    store.decide(
+        commented.id,
+        Decision.COMMENT,
+        actor_id="owner",
+        comment="Make the opening more direct.",
+    )
+    store.decide(denied.id, Decision.DENY, actor_id="owner", comment="Do not post this.")
+
+    assert store.claim(commented.id, expected_digest="commented") is False
+    assert store.claim(denied.id, expected_digest="denied") is False
+    assert store.get_request(commented.id).state is RequestState.CHANGES_REQUESTED
+    assert store.get_request(denied.id).state is RequestState.DENIED
+
+
+def test_comment_requires_text(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+
+    with pytest.raises(ValueError, match="comment"):
+        store.decide(request.id, Decision.COMMENT, actor_id="owner", comment="  ")
+
+
+def test_second_decision_is_rejected(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    store.decide(request.id, Decision.DENY, actor_id="owner")
+
+    with pytest.raises(ConflictError):
+        store.decide(request.id, Decision.APPROVE, actor_id="owner")
+
+
+def test_stale_claim_recovery_is_uncertain(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    store.decide(request.id, Decision.APPROVE, actor_id="owner")
+    assert store.claim(request.id, expected_digest="digest-a") is True
+
+    recovered = store.recover_claimed_as_uncertain()
+
+    assert recovered == 1
+    assert store.get_request(request.id).state is RequestState.UNCERTAIN
+
+
+def test_owner_token_is_registered_once_and_verified_without_storing_plaintext(
+    tmp_path: Path,
+) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    token = "a" * 64
+
+    assert store.register_owner_token(token) is True
+    assert store.register_owner_token(token) is True
+    assert store.register_owner_token("b" * 64) is False
+    assert store.verify_owner_token(token) is True
+    assert store.verify_owner_token("b" * 64) is False
+
+    raw = (tmp_path / "gate.db").read_bytes()
+    assert token.encode() not in raw
+
+
+def test_owner_token_rejects_short_values(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+
+    with pytest.raises(ValueError, match="32"):
+        store.register_owner_token("short")

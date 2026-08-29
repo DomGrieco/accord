@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools==79.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-human-gate"
+version = "0.1.0.dev0"
+description = "Durable human approval gates for consequential Hermes Agent tool calls"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Dominic Grieco"}]
+keywords = ["hermes-agent", "human-in-the-loop", "approval", "ai-agents"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/DomGrieco/hermes-human-gate"
+Repository = "https://github.com/DomGrieco/hermes-human-gate"
+Issues = "https://github.com/DomGrieco/hermes-human-gate/issues"
+
+[tool.setuptools]
+packages = ["human_gate"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = ["E501", "S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+show_error_codes = true
+explicit_package_bases = true
+
+[dependency-groups]
+dev = [
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pyyaml>=6,<7",
+  "ruff>=0.9,<1",
+  "setuptools==79.0.1",
+]

@@ -1,0 +1,17 @@
+name: human-gate
+version: 0.1.0.dev0
+description: "Durable non-expiring human approval cards for consequential Hermes Agent tool calls."
+author: Dominic Grieco
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+provides_tools:
+  - human_gate_list
+  - human_gate_get
+  - human_gate_demo_effect
+provides_hooks:
+  - pre_tool_call
+provides_middleware:
+  - tool_execution
