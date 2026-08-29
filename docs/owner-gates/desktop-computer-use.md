@@ -4,7 +4,7 @@ Status: blocked on the macOS capture path only. Backend, policy, persistence, an
 
 ## Observed
 
-- Retried at 2026-08-29 07:11 ADT. Exact Hermes capture still returned a zero by zero image with no accessibility elements.
+- Retried at 2026-08-29 08:20 ADT after adding approval revocation. `list_apps` found the running Hermes process, but exact Hermes capture still returned a zero by zero image with no accessibility elements.
 - The earlier 2026-08-29 06:16 ADT retry listed two running Hermes windows and a macOS `Screen Recording` permission window.
 - Earlier full-screen capture returned a black image.
 - Capturing Google Chrome also returned a zero by zero image, so the failure is not specific to the Human Gate panel.

@@ -72,7 +72,14 @@ def test_owner_registration_and_approval_return_durable_resume_instruction(
     assert approved.status_code == 200
     body = approved.json()
     assert body["request"]["state"] == "approved"
-    assert body["resume"] == {
+    assert body["resume"] is None
+
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+    assert instruction.status_code == 200
+    assert instruction.json()["resume"] == {
         "stored_session_id": "stored-session",
         "profile": "life",
         "display_kind": "hidden",
@@ -87,7 +94,7 @@ def test_owner_registration_and_approval_return_durable_resume_instruction(
     stored = GateStore(path).get_request(request.id)
     assert stored is not None
     assert stored.state is RequestState.APPROVED
-    assert stored.resume_state is ResumeState.PENDING
+    assert stored.resume_state is ResumeState.DISPATCHING
 
 
 def test_decision_rejects_wrong_owner_token(tmp_path: Path) -> None:
@@ -119,7 +126,12 @@ def test_comment_resumes_with_owner_words_but_never_approves(tmp_path: Path) -> 
     )
 
     assert response.status_code == 200
-    assert "Make the first sentence shorter." in response.json()["resume"]["prompt"]
+    assert response.json()["resume"] is None
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+    assert "Make the first sentence shorter." in instruction.json()["resume"]["prompt"]
     stored = GateStore(path).get_request(request.id)
     assert stored is not None
     assert stored.state is RequestState.CHANGES_REQUESTED
@@ -145,6 +157,36 @@ def test_cancel_closes_request_without_resuming_or_stopping_session(tmp_path: Pa
     assert stored is not None
     assert stored.state is RequestState.CANCELLED
     assert stored.resume_state is ResumeState.NOT_REQUESTED
+
+
+def test_approved_request_can_be_revoked_without_session_action(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    approved = client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "approve"),
+    ).json()["request"]
+
+    revoked = client.post(
+        f"/requests/{request.id}/decision",
+        json={
+            "token": OWNER_TOKEN,
+            "decision": "cancel",
+            "comment": "Withdraw approval.",
+            "digest": approved["call_digest"],
+            "record_version": approved["record_version"],
+        },
+    )
+
+    assert revoked.status_code == 200
+    assert revoked.json()["request"]["state"] == "cancelled"
+    assert revoked.json()["request"]["resume_state"] == "not_requested"
+    assert revoked.json()["resume"] is None
+    assert revoked.json()["terminate"] is None
+    store = GateStore(path)
+    assert store.claim(request.id, expected_digest="d" * 64) is False
 
 
 def test_deny_kills_request_without_waking_session_or_replay_authority(
@@ -214,6 +256,10 @@ def test_resume_ack_is_separate_and_authenticated(tmp_path: Path) -> None:
         f"/requests/{request.id}/decision",
         json=_decision_body(request, "approve"),
     )
+    client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
 
     wrong = client.post(
         f"/requests/{request.id}/resume-ack",
@@ -251,6 +297,10 @@ def test_failed_resume_can_be_retried_without_a_second_decision(tmp_path: Path) 
         f"/requests/{request.id}/decision",
         json=_decision_body(request, "comment", "Use fewer words."),
     )
+    client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
     assert client.post(
         f"/requests/{request.id}/resume-failed",
         json={"token": OWNER_TOKEN},
@@ -265,7 +315,39 @@ def test_failed_resume_can_be_retried_without_a_second_decision(tmp_path: Path) 
     assert "Use fewer words." in retry.json()["resume"]["prompt"]
     stored = GateStore(path).get_request(request.id)
     assert stored is not None
-    assert stored.resume_state is ResumeState.PENDING
+    assert stored.resume_state is ResumeState.DISPATCHING
+
+
+def test_cancel_cannot_race_an_in_flight_resume(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    approved = client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "approve"),
+    ).json()["request"]
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+
+    cancel = client.post(
+        f"/requests/{request.id}/decision",
+        json={
+            "token": OWNER_TOKEN,
+            "decision": "cancel",
+            "comment": "Too late to dispatch.",
+            "digest": approved["call_digest"],
+            "record_version": instruction.json()["request"]["record_version"],
+        },
+    )
+
+    assert cancel.status_code == 409
+    stored = GateStore(path).get_request(request.id)
+    assert stored is not None
+    assert stored.state is RequestState.APPROVED
+    assert stored.resume_state is ResumeState.DISPATCHING
 
 
 def test_approval_requires_authoritative_digest_and_record_version(tmp_path: Path) -> None:

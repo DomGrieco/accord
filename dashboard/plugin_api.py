@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from human_gate.models import Decision, RequestRecord, RequestState, ResumeState
+from human_gate.models import Decision, RequestRecord, RequestState
 from human_gate.paths import resolve_db_path
 from human_gate.store import ConflictError, GateStore
 
@@ -145,7 +145,7 @@ def build_router(path: str | Path) -> APIRouter:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {
                 "request": _record(record),
-                "resume": _resume(record, decision, body.comment),
+                "resume": None,
                 "terminate": _terminate(record, decision),
             }
         finally:
@@ -184,15 +184,10 @@ def build_router(path: str | Path) -> APIRouter:
         store = GateStore(db_path)
         try:
             _authorize(store, body.token)
-            record = store.get_request(request_id)
-            if record is None:
-                raise HTTPException(status_code=404, detail="request not found")
-            if record.resume_state is ResumeState.DELIVERED:
-                raise HTTPException(status_code=409, detail="resume was already delivered")
-            if record.resume_state is ResumeState.FAILED:
-                record = store.begin_resume_retry(request_id)
-            elif record.resume_state is not ResumeState.PENDING:
-                raise HTTPException(status_code=409, detail="request has no resumable decision")
+            try:
+                record = store.begin_resume_delivery(request_id)
+            except ConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             latest = store.latest_decision(request_id)
             if latest is None:
                 raise HTTPException(status_code=409, detail="request has no decision")

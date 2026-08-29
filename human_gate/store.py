@@ -396,6 +396,9 @@ class GateStore:
                 resume_state.value,
                 now,
                 request_id,
+                decision.value,
+                decision.value,
+                decision.value,
                 expected_digest,
                 expected_digest,
                 expected_record_version,
@@ -404,13 +407,16 @@ class GateStore:
             updated = self._connection.execute(
                 "UPDATE requests SET state = ?, resume_state = ?, updated_at = ?, "
                 "record_version = record_version + 1 "
-                "WHERE id = ? AND state = 'pending' "
+                "WHERE id = ? "
+                "AND ((? = 'cancel' AND state IN ('pending', 'approved', 'changes_requested')) "
+                "OR (? != 'cancel' AND state = 'pending')) "
+                "AND NOT (? = 'cancel' AND resume_state = 'dispatching') "
                 "AND (? IS NULL OR call_digest = ?) "
                 "AND (? IS NULL OR record_version = ?)",
                 parameters,
             )
             if updated.rowcount != 1:
-                raise ConflictError("request changed or is not pending")
+                raise ConflictError("request changed or is not eligible for this decision")
             self._connection.execute(
                 """
                 INSERT INTO decisions(id, request_id, decision, actor_kind, actor_id, comment, created_at)
@@ -447,11 +453,11 @@ class GateStore:
                 ResumeState.DELIVERED.value,
                 now,
                 request_id,
-                ResumeState.PENDING.value,
+                ResumeState.DISPATCHING.value,
             ),
         )
         if updated.rowcount != 1:
-            raise ConflictError("request does not have a pending resume")
+            raise ConflictError("request does not have a dispatching resume")
         record = self.get_request(request_id)
         if record is None:
             raise RuntimeError("resumed request disappeared")
@@ -468,35 +474,40 @@ class GateStore:
                 ResumeState.FAILED.value,
                 now,
                 request_id,
-                ResumeState.PENDING.value,
+                ResumeState.DISPATCHING.value,
             ),
         )
         if updated.rowcount != 1:
-            raise ConflictError("request does not have a pending resume")
+            raise ConflictError("request does not have a dispatching resume")
         record = self.get_request(request_id)
         if record is None:
             raise RuntimeError("failed-resume request disappeared")
         return record
 
-    def begin_resume_retry(self, request_id: str) -> RequestRecord:
+    def begin_resume_delivery(self, request_id: str) -> RequestRecord:
         now = _now()
-        updated = self._connection.execute(
-            """
-            UPDATE requests SET resume_state = ?, updated_at = ?
-            WHERE id = ? AND resume_state = ?
-            """,
-            (
-                ResumeState.PENDING.value,
-                now,
-                request_id,
-                ResumeState.FAILED.value,
-            ),
-        )
-        if updated.rowcount != 1:
-            raise ConflictError("request does not have a failed resume")
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            updated = self._connection.execute(
+                """
+                UPDATE requests
+                SET resume_state = ?, updated_at = ?, record_version = record_version + 1
+                WHERE id = ?
+                  AND state IN ('approved', 'changes_requested')
+                  AND resume_state IN ('pending', 'failed')
+                """,
+                (ResumeState.DISPATCHING.value, now, request_id),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("request does not have a resumable decision")
+            self._connection.execute("COMMIT")
+        except Exception:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
         record = self.get_request(request_id)
         if record is None:
-            raise RuntimeError("resume retry request disappeared")
+            raise RuntimeError("resume delivery request disappeared")
         return record
 
     def latest_decision(self, request_id: str) -> tuple[Decision, str] | None:

@@ -21,6 +21,7 @@ class RequestState(str, Enum):
 class ResumeState(str, Enum):
     NOT_REQUESTED = "not_requested"
     PENDING = "pending"
+    DISPATCHING = "dispatching"
     DELIVERED = "delivered"
     FAILED = "failed"
 

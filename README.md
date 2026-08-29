@@ -2,7 +2,7 @@
 
 Durable human approval cards for consequential [Hermes Agent](https://github.com/NousResearch/hermes-agent) tool calls.
 
-Human Gate turns a tool call into a persistent decision instead of holding a live model turn open. The owner can approve, deny, comment, or cancel later. Approval and comment resume the originating Hermes session. Denial closes the request and any matching live originating session without waking the agent. Cancellation withdraws the request without touching the session. An approval authorizes one exact replay of the captured call.
+Human Gate turns a tool call into a persistent decision instead of holding a live model turn open. The owner can approve, deny, comment, or cancel later. Approval and comment resume the originating Hermes session. Denial closes the request and any matching live originating session without waking the agent. Cancellation withdraws a pending request, an unclaimed approval, or a change request without touching the session. An approval authorizes one exact replay of the captured call until the gate claims it or the owner revokes it.
 
 > [!WARNING]
 > This project is under active development. It does not yet authorize live provider mutations.
@@ -21,7 +21,7 @@ Hermes Desktop shows a non-expiring card
         +-- Approve -> resume session -> allow one exact replay
         +-- Comment -> resume session -> ask agent to revise
         +-- Deny    -> close the request and matching live session
-        +-- Cancel  -> close the request without touching the session
+        +-- Cancel  -> withdraw pending or unclaimed authority without a session action
 ```
 
 ## Enforcement model
@@ -38,7 +38,7 @@ Level 3 is the security target for publishing. A hook alone cannot stop a disabl
 
 - Profile-scoped SQLite state
 - Persistent Desktop approval inbox
-- Approve, deny, comment, cancel, retry resume, and retry session stop
+- Approve, deny, comment, cancel, revoke unclaimed approval, retry resume, and retry session stop
 - Exact canonical call hashes and one-use claims
 - Startup recovery marks abandoned claimed effects uncertain without retrying them. A process-held runtime lock prevents a second plugin process from recovering a claim that may still be executing.
 - Hidden continuation into the originating stored session

@@ -89,6 +89,12 @@ function StateBadge({ state }) {
   })
 }
 
+export function approvalCancellationLabel(state) {
+  if (state === 'approved') return 'Revoke approval'
+  if (state === 'changes_requested') return 'Cancel request'
+  return ''
+}
+
 function DisplayProjection({ display }) {
   const entries = Object.entries(display || {})
   if (!entries.length) {
@@ -228,16 +234,12 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           record_version: request.record_version
         }
       })
-      if (result.resume) {
-        try {
-          await submitResume(ctx, result.resume, ownerToken)
-        } catch (resumeError) {
-          await ctx.rest(`/requests/${request.id}/resume-failed`, {
-            method: 'POST',
-            body: { token: ownerToken }
-          }).catch(() => undefined)
-          throw resumeError
-        }
+      if (decision === 'approve' || decision === 'comment') {
+        const instruction = await ctx.rest(`/requests/${request.id}/resume-instruction`, {
+          method: 'POST',
+          body: { token: ownerToken }
+        })
+        await submitResume(ctx, instruction.resume, ownerToken)
       } else if (result.terminate) {
         await terminateSession(result.terminate)
       }
@@ -260,7 +262,16 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
     } finally {
       setBusy('')
     }
-  }, [comment, ctx, onChanged, ownerToken, request.id, request.tool_name])
+  }, [
+    comment,
+    ctx,
+    onChanged,
+    ownerToken,
+    request.call_digest,
+    request.id,
+    request.record_version,
+    request.tool_name
+  ])
 
   const retryResume = useCallback(async () => {
     setBusy('resume')
@@ -270,15 +281,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
         method: 'POST',
         body: { token: ownerToken }
       })
-      try {
-        await submitResume(ctx, result.resume, ownerToken)
-      } catch (resumeError) {
-        await ctx.rest(`/requests/${request.id}/resume-failed`, {
-          method: 'POST',
-          body: { token: ownerToken }
-        }).catch(() => undefined)
-        throw resumeError
-      }
+      await submitResume(ctx, result.resume, ownerToken)
       host.notify({ kind: 'success', message: 'The originating session is resuming.' })
       await onChanged()
     } catch (cause) {
@@ -288,6 +291,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
       setBusy('')
     }
   }, [ctx, onChanged, ownerToken, request.id])
+
 
   const retryTermination = useCallback(async () => {
     setBusy('terminate')
@@ -313,6 +317,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
   }, [ctx, onChanged, ownerToken, request.id])
 
   const pending = request.state === 'pending'
+  const cancellationLabel = approvalCancellationLabel(request.state)
   return jsxs('article', {
     className: 'grid gap-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-4',
     children: [
@@ -386,12 +391,23 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           })
         ]
       }),
+      cancellationLabel && jsx('button', {
+        type: 'button',
+        className: 'w-fit rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm text-(--ui-text-secondary) disabled:opacity-50',
+        disabled: Boolean(busy) || !ownerToken,
+        onClick: () => void decide('cancel'),
+        children: busy === 'cancel' ? 'Cancelling…' : cancellationLabel
+      }),
       request.resume_state === 'failed' && jsx('button', {
         type: 'button',
         className: 'w-fit rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm disabled:opacity-50',
         disabled: Boolean(busy),
         onClick: () => void retryResume(),
         children: busy === 'resume' ? 'Waking session…' : 'Retry session wake'
+      }),
+      request.resume_state === 'dispatching' && jsx('p', {
+        className: 'text-xs text-(--ui-warning)',
+        children: 'Session wake is in progress or uncertain. Human Gate will not retry it automatically.'
       }),
       request.state === 'denied' && jsx('button', {
         type: 'button',

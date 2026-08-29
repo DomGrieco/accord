@@ -101,6 +101,133 @@ def test_claim_rejects_digest_mismatch(tmp_path: Path) -> None:
     assert store.get_request(request.id).state is RequestState.APPROVED
 
 
+def test_approved_request_can_be_cancelled_before_claim(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    approved = store.decide(request.id, Decision.APPROVE, actor_id="owner")
+
+    cancelled = store.decide(
+        request.id,
+        Decision.CANCEL,
+        actor_id="owner",
+        comment="Approval withdrawn.",
+        expected_digest=approved.call_digest,
+        expected_record_version=approved.record_version,
+    )
+
+    assert cancelled.state is RequestState.CANCELLED
+    assert store.find_matching_approved(
+        profile="life",
+        session_lineage="session-stored",
+        tool_name="x_create_post",
+        call_digest="digest-a",
+    ) is None
+    assert store.claim(request.id, expected_digest="digest-a") is False
+
+
+def test_changes_requested_request_can_be_cancelled(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    changes = store.decide(
+        request.id,
+        Decision.COMMENT,
+        actor_id="owner",
+        comment="Revise this.",
+    )
+
+    cancelled = store.decide(
+        request.id,
+        Decision.CANCEL,
+        actor_id="owner",
+        expected_digest=changes.call_digest,
+        expected_record_version=changes.record_version,
+    )
+
+    assert cancelled.state is RequestState.CANCELLED
+
+
+def test_cancel_and_claim_race_has_exactly_one_winner(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    setup = GateStore(path)
+    request = create_request(setup)
+    approved = setup.decide(request.id, Decision.APPROVE, actor_id="owner")
+    setup.close()
+
+    barrier = Barrier(3)
+    lock = Lock()
+    outcomes: list[str] = []
+
+    def claim() -> None:
+        store = GateStore(path)
+        barrier.wait()
+        claimed = store.claim(request.id, expected_digest="digest-a")
+        with lock:
+            outcomes.append("claimed" if claimed else "claim-rejected")
+        store.close()
+
+    def cancel() -> None:
+        store = GateStore(path)
+        barrier.wait()
+        try:
+            store.decide(
+                request.id,
+                Decision.CANCEL,
+                actor_id="owner",
+                expected_digest=approved.call_digest,
+                expected_record_version=approved.record_version,
+            )
+        except ConflictError:
+            outcome = "cancel-rejected"
+        else:
+            outcome = "cancelled"
+        with lock:
+            outcomes.append(outcome)
+        store.close()
+
+    workers = [Thread(target=claim), Thread(target=cancel)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join()
+
+    final = GateStore(path).get_request(request.id)
+    assert final is not None
+    if final.state is RequestState.CLAIMED:
+        assert sorted(outcomes) == ["cancel-rejected", "claimed"]
+    else:
+        assert final.state is RequestState.CANCELLED
+        assert sorted(outcomes) == ["cancelled", "claim-rejected"]
+
+
+@pytest.mark.parametrize(
+    "terminal_state",
+    [RequestState.CLAIMED, RequestState.EXECUTED, RequestState.FAILED, RequestState.UNCERTAIN],
+)
+def test_cancel_rejects_claimed_and_terminal_requests(
+    tmp_path: Path, terminal_state: RequestState
+) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    approved = store.decide(request.id, Decision.APPROVE, actor_id="owner")
+    assert store.claim(request.id, expected_digest="digest-a") is True
+    if terminal_state is not RequestState.CLAIMED:
+        store.complete(
+            request.id,
+            terminal_state,
+            result={"ok": terminal_state is RequestState.EXECUTED},
+        )
+
+    with pytest.raises(ConflictError):
+        store.decide(
+            request.id,
+            Decision.CANCEL,
+            actor_id="owner",
+            expected_digest=approved.call_digest,
+            expected_record_version=approved.record_version,
+        )
+
+
 def test_comment_and_deny_never_create_execution_authority(tmp_path: Path) -> None:
     store = GateStore(tmp_path / "gate.db")
     commented = create_request(store, digest="commented")

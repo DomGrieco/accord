@@ -42,6 +42,7 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "comment" in source
     assert "cancel" in source
     assert "Cancel request" in source
+    assert "Revoke approval" in source
     assert "host.profileRoutes" in source
     assert "host.retainProfile" in source
     assert "host.requestProfile" in source
@@ -61,7 +62,9 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "/termination-instruction" in source
     assert "Ensure session stopped" in source
     assert "/resume-ack" in source
+    assert "/resume-failed" not in source
     assert "/resume-instruction" in source
     assert "Retry session wake" in source
+    assert "Human Gate will not retry it automatically" in source
     assert "setTimeout" in source
     assert "expires" not in source

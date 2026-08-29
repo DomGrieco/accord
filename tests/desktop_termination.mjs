@@ -37,6 +37,12 @@ const modules = {
 
 await plugin.link(specifier => modules[specifier])
 await plugin.evaluate()
+const cancellationLabel = plugin.namespace.approvalCancellationLabel
+assert.equal(cancellationLabel('approved'), 'Revoke approval')
+assert.equal(cancellationLabel('changes_requested'), 'Cancel request')
+assert.equal(cancellationLabel('pending'), '')
+assert.equal(cancellationLabel('claimed'), '')
+
 const select = plugin.namespace.selectRuntimeToClose
 
 assert.throws(() => select(null, 'stored'), /valid sessions array/)
