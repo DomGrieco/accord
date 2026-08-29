@@ -16,7 +16,7 @@ class OwnerTokenBody(BaseModel):
 
 
 class DecisionBody(OwnerTokenBody):
-    decision: Literal["approve", "deny", "comment"]
+    decision: Literal["approve", "deny", "comment", "cancel"]
     comment: str = Field(default="", max_length=20_000)
     digest: str = Field(min_length=64, max_length=64)
     record_version: int = Field(ge=1)
@@ -60,7 +60,7 @@ def _resume_prompt(record: RequestRecord, decision: Decision, comment: str) -> s
 def _resume(
     record: RequestRecord, decision: Decision, comment: str
 ) -> dict[str, str] | None:
-    if decision is Decision.DENY:
+    if decision not in {Decision.APPROVE, Decision.COMMENT}:
         return None
     return {
         "stored_session_id": record.session_lineage,

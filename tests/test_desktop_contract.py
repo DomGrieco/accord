@@ -40,6 +40,8 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "approve" in source
     assert "deny" in source
     assert "comment" in source
+    assert "cancel" in source
+    assert "Cancel request" in source
     assert "host.profileRoutes" in source
     assert "host.retainProfile" in source
     assert "host.requestProfile" in source

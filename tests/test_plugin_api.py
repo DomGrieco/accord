@@ -125,6 +125,28 @@ def test_comment_resumes_with_owner_words_but_never_approves(tmp_path: Path) -> 
     assert stored.state is RequestState.CHANGES_REQUESTED
 
 
+def test_cancel_closes_request_without_resuming_or_stopping_session(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+
+    response = client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "cancel", "Withdraw this request."),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["resume"] is None
+    assert response.json()["terminate"] is None
+    store = GateStore(path)
+    assert store.claim(request.id, expected_digest="d" * 64) is False
+    stored = store.get_request(request.id)
+    assert stored is not None
+    assert stored.state is RequestState.CANCELLED
+    assert stored.resume_state is ResumeState.NOT_REQUESTED
+
+
 def test_deny_kills_request_without_waking_session_or_replay_authority(
     tmp_path: Path,
 ) -> None:

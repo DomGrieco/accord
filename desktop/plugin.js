@@ -248,7 +248,9 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           ? `Approved ${request.tool_name}; the originating session is resuming.`
           : decision === 'deny'
             ? `Denied ${request.tool_name}; the originating session is stopped.`
-            : `Decision sent to the originating session.`
+            : decision === 'cancel'
+              ? `Cancelled ${request.tool_name}; no session action was taken.`
+              : `Decision sent to the originating session.`
       })
       setComment('')
       await onChanged()
@@ -365,6 +367,13 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
                 disabled: Boolean(busy),
                 onClick: () => void decide('comment'),
                 children: busy === 'comment' ? 'Sending…' : 'Request changes'
+              }),
+              jsx('button', {
+                type: 'button',
+                className: 'rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm text-(--ui-text-secondary) disabled:opacity-50',
+                disabled: Boolean(busy),
+                onClick: () => void decide('cancel'),
+                children: busy === 'cancel' ? 'Cancelling…' : 'Cancel request'
               }),
               jsx('button', {
                 type: 'button',

@@ -4,9 +4,10 @@ Status: blocked on the macOS capture path only. Backend, policy, persistence, an
 
 ## Observed
 
-- `computer_use` listed the running Hermes windows.
-- Hermes window capture returned a zero by zero image with no accessibility elements.
-- Full-screen capture returned a black image.
+- Retried at 2026-08-29 06:16 ADT.
+- `computer_use` listed two running Hermes windows and a macOS `Screen Recording` permission window.
+- Exact Hermes window capture still returned a zero by zero image with no accessibility elements.
+- Earlier full-screen capture returned a black image.
 - Capturing Google Chrome also returned a zero by zero image, so the failure is not specific to the Human Gate panel.
 - `screencapture` could not create an image from the display.
 - `hermes computer-use doctor` reported Cua Driver 0.22.1, an active MCP session, Accessibility access, and Screen Recording access. It did not probe direct ScreenCaptureKit readiness.
