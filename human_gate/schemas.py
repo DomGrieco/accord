@@ -65,3 +65,14 @@ MOCK_PUBLISH = _schema(
     },
     required=["destination", "text", "media_sha256", "idempotency_key"],
 )
+
+X_CREATE_POST = _schema(
+    "x_create_post",
+    "Create one post or quote post on X. Human Gate requires exact owner approval before this owned effect can contact X.",
+    {
+        "account": {"type": "string", "minLength": 1, "maxLength": 64},
+        "text": {"type": "string", "minLength": 1, "maxLength": 280},
+        "quote_post_id": {"type": "string", "pattern": "^[0-9]{1,32}$"},
+    },
+    required=["account", "text"],
+)

@@ -48,6 +48,7 @@ class RequestRecord:
     replay_json: str
     state: RequestState
     resume_state: ResumeState
+    resume_error: str | None
     supersedes_request_id: str | None
     created_at: str
     updated_at: str

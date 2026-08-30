@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -23,18 +27,63 @@ _SPEC.loader.exec_module(_API)
 build_router: Callable[[Path], Any] = _API.build_router
 
 
+def test_dashboard_api_imports_from_plugin_root_without_installed_package(
+    tmp_path: Path,
+) -> None:
+    isolated_root = tmp_path / "human-gate-plugin"
+    isolated_dashboard = isolated_root / "dashboard"
+    isolated_dashboard.mkdir(parents=True)
+    isolated_api = isolated_dashboard / "plugin_api.py"
+    shutil.copy2(_API_PATH, isolated_api)
+    shutil.copytree(_API_PATH.parent.parent / "human_gate", isolated_root / "human_gate")
+    script = """
+import importlib.util
+import sys
+from pathlib import Path
+
+api_path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("hermes_dashboard_plugin_human_gate", api_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+assert module.router is not None
+assert Path(sys.modules["human_gate"].__file__).resolve().is_relative_to(
+    api_path.parent.parent.resolve()
+)
+"""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(  # noqa: S603 - current interpreter and fixed script
+        [sys.executable, "-I", "-c", script, str(isolated_api)],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def _app(path: Path) -> TestClient:
     app = FastAPI()
     app.include_router(build_router(path))
     return TestClient(app)
 
 
-def _pending(path: Path):
+def _pending(
+    path: Path,
+    *,
+    session_id: str = "runtime-session",
+    session_lineage: str = "stored-session",
+):
     store = GateStore(path)
     request = store.create_or_get_pending(
         profile="life",
-        session_id="runtime-session",
-        session_lineage="stored-session",
+        session_id=session_id,
+        session_lineage=session_lineage,
         tool_name="x_create_post",
         effect_kind="publish",
         call_digest="d" * 64,
@@ -132,10 +181,11 @@ def test_owner_registration_and_approval_return_durable_resume_instruction(
     )
     assert instruction.status_code == 200
     assert instruction.json()["resume"] == {
-        "stored_session_id": "stored-session",
+        "stored_session_id": "runtime-session",
         "profile": "life",
         "display_kind": "hidden",
         "request_id": request.id,
+        "record_version": instruction.json()["request"]["record_version"],
         "prompt": (
             f"Human Gate request {request.id} was approved by the owner. "
             "Retry the exact original tool call once without changing its arguments. "
@@ -189,7 +239,22 @@ def test_comment_resumes_with_owner_words_but_never_approves(tmp_path: Path) -> 
     assert stored.state is RequestState.CHANGES_REQUESTED
 
 
-def test_cancel_closes_request_without_resuming_or_stopping_session(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("decision", "comment", "expected_state", "expected_text"),
+    [
+        ("approve", "Ship this exact call.", "approved", "Ship this exact call."),
+        ("comment", "Change only the ending.", "changes_requested", "Change only the ending."),
+        ("deny", "This must not run.", "denied", "This must not run."),
+        ("cancel", "No longer needed.", "cancelled", "No longer needed."),
+    ],
+)
+def test_every_decision_returns_a_nonempty_owner_decision_envelope(
+    tmp_path: Path,
+    decision: str,
+    comment: str,
+    expected_state: str,
+    expected_text: str,
+) -> None:
     path = tmp_path / "gate.db"
     request = _pending(path)
     client = _app(path)
@@ -197,21 +262,75 @@ def test_cancel_closes_request_without_resuming_or_stopping_session(tmp_path: Pa
 
     response = client.post(
         f"/requests/{request.id}/decision",
-        json=_decision_body(request, "cancel", "Withdraw this request."),
+        json=_decision_body(request, decision, comment),
     )
 
     assert response.status_code == 200
-    assert response.json()["resume"] is None
-    assert response.json()["terminate"] is None
+    body = response.json()
+    assert body["request"]["state"] == expected_state
+    envelope = body["decision_envelope"]
+    assert envelope["request_id"] == request.id
+    assert envelope["decision"] == decision
+    assert envelope["profile"] == "life"
+    assert envelope["stored_session_id"] == "runtime-session"
+    assert envelope["prompt"].strip()
+    assert expected_text in envelope["prompt"]
+
+
+@pytest.mark.parametrize("decision", ["approve", "comment", "deny", "cancel"])
+def test_every_decision_resume_envelope_targets_exact_record_session(
+    tmp_path: Path,
+    decision: str,
+) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(
+        path,
+        session_id="runtime-tip",
+        session_lineage="stored-root",
+    )
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+
+    response = client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, decision, "Owner decision."),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision_envelope"]["stored_session_id"] == "runtime-tip"
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+    assert instruction.status_code == 200
+    assert instruction.json()["resume"]["stored_session_id"] == "runtime-tip"
+
+
+def test_cancel_queues_nonexecuting_resume_to_originating_session(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    response = client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "cancel", "Withdraw this request."),
+    )
+    assert response.status_code == 200
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+    assert instruction.status_code == 200
+    assert "Withdraw this request." in instruction.json()["resume"]["prompt"]
     store = GateStore(path)
     assert store.claim(request.id, expected_digest="d" * 64) is False
     stored = store.get_request(request.id)
     assert stored is not None
     assert stored.state is RequestState.CANCELLED
-    assert stored.resume_state is ResumeState.NOT_REQUESTED
+    assert stored.resume_state is ResumeState.DISPATCHING
 
 
-def test_approved_request_can_be_revoked_without_session_action(tmp_path: Path) -> None:
+def test_approved_request_can_be_revoked_with_cancel_resume(tmp_path: Path) -> None:
     path = tmp_path / "gate.db"
     request = _pending(path)
     client = _app(path)
@@ -234,14 +353,14 @@ def test_approved_request_can_be_revoked_without_session_action(tmp_path: Path) 
 
     assert revoked.status_code == 200
     assert revoked.json()["request"]["state"] == "cancelled"
-    assert revoked.json()["request"]["resume_state"] == "not_requested"
+    assert revoked.json()["request"]["resume_state"] == "pending"
     assert revoked.json()["resume"] is None
     assert revoked.json()["terminate"] is None
     store = GateStore(path)
     assert store.claim(request.id, expected_digest="d" * 64) is False
 
 
-def test_deny_kills_request_without_waking_session_or_replay_authority(
+def test_deny_queues_nonexecuting_resume_without_replay_authority(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "gate.db"
@@ -255,21 +374,51 @@ def test_deny_kills_request_without_waking_session_or_replay_authority(
     )
 
     assert response.status_code == 200
-    assert response.json()["resume"] is None
-    assert response.json()["terminate"] == {
-        "stored_session_id": "stored-session",
-        "profile": "life",
-        "request_id": request.id,
-    }
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+    assert instruction.status_code == 200
+    assert "Do not post this." in instruction.json()["resume"]["prompt"]
     store = GateStore(path)
     assert store.claim(request.id, expected_digest="d" * 64) is False
     stored = store.get_request(request.id)
     assert stored is not None
     assert stored.state is RequestState.DENIED
-    assert stored.resume_state is ResumeState.NOT_REQUESTED
+    assert stored.resume_state is ResumeState.DISPATCHING
 
 
-def test_denied_request_exposes_authenticated_retryable_termination_instruction(
+def test_resume_target_registers_continuation_tip_under_stable_request_lineage(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(path)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "approve"),
+    )
+
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+    response = client.post(
+        f"/requests/{request.id}/resume-target",
+        json={
+            "token": OWNER_TOKEN,
+            "record_version": instruction.json()["resume"]["record_version"],
+            "session_id": "continuation-tip",
+        },
+    )
+
+    assert response.status_code == 200
+    store = GateStore(path)
+    assert store.resolve_session_lineage("life", "continuation-tip") == "stored-session"
+
+
+def test_denied_request_never_exposes_a_termination_instruction(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "gate.db"
@@ -292,11 +441,7 @@ def test_denied_request_exposes_authenticated_retryable_termination_instruction(
 
     assert wrong.status_code == 403
     assert retry.status_code == 200
-    assert retry.json()["terminate"] == {
-        "stored_session_id": "stored-session",
-        "profile": "life",
-        "request_id": request.id,
-    }
+    assert retry.json()["terminate"] is None
 
 
 def test_resume_ack_is_separate_and_authenticated(tmp_path: Path) -> None:
@@ -308,18 +453,19 @@ def test_resume_ack_is_separate_and_authenticated(tmp_path: Path) -> None:
         f"/requests/{request.id}/decision",
         json=_decision_body(request, "approve"),
     )
-    client.post(
+    instruction = client.post(
         f"/requests/{request.id}/resume-instruction",
         json={"token": OWNER_TOKEN},
     )
+    attempt_version = instruction.json()["resume"]["record_version"]
 
     wrong = client.post(
         f"/requests/{request.id}/resume-ack",
-        json={"token": "x" * 64},
+        json={"token": "x" * 64, "record_version": attempt_version},
     )
     ok = client.post(
         f"/requests/{request.id}/resume-ack",
-        json={"token": OWNER_TOKEN},
+        json={"token": OWNER_TOKEN, "record_version": attempt_version},
     )
 
     assert wrong.status_code == 403
@@ -349,14 +495,23 @@ def test_failed_resume_can_be_retried_without_a_second_decision(tmp_path: Path) 
         f"/requests/{request.id}/decision",
         json=_decision_body(request, "comment", "Use fewer words."),
     )
-    client.post(
+    instruction = client.post(
         f"/requests/{request.id}/resume-instruction",
         json={"token": OWNER_TOKEN},
     )
-    assert client.post(
+    failed = client.post(
         f"/requests/{request.id}/resume-failed",
-        json={"token": OWNER_TOKEN},
-    ).status_code == 200
+        json={
+            "token": OWNER_TOKEN,
+            "error": "Hermes active session limit (3/3); retry after a slot is free.",
+            "record_version": instruction.json()["resume"]["record_version"],
+        },
+    )
+    assert failed.status_code == 200
+    assert failed.json()["request"]["resume_state"] == "failed"
+    assert failed.json()["request"]["resume_error"] == (
+        "Hermes active session limit (3/3); retry after a slot is free."
+    )
 
     retry = client.post(
         f"/requests/{request.id}/resume-instruction",

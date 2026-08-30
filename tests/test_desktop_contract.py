@@ -55,12 +55,11 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "digest: request.call_digest" in source
     assert "record_version: request.record_version" in source
     assert "result.resume" in source
-    assert "result.terminate" in source
+
     assert "session.active_list" in source
     assert "session.close" in source
     assert "row.session_key" in source
-    assert "/termination-instruction" in source
-    assert "Ensure session stopped" in source
+    assert "Ensure session stopped" not in source
     assert "/resume-ack" in source
     assert "/resume-failed" in source
     assert "wakeAttempted" in source

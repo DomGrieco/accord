@@ -9,12 +9,195 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-const ACTIVE_STATES = 'pending,approved,changes_requested,denied,claimed,executed,failed,uncertain'
+const ACTIVE_STATES = 'pending,approved,changes_requested,denied,cancelled,claimed,executed,failed,uncertain'
+const ACTIVE_CANCELLED_RESUME_STATES = new Set(['pending', 'dispatching', 'failed'])
+const PROFILE_PROBE_PATH = '/requests?state=pending&limit=1'
+let lastFocusedOwner = null
+let resolvedPluginScope = null
+let pluginScopeResolution = null
 
 function randomOwnerToken() {
   const bytes = new Uint8Array(32)
   crypto.getRandomValues(bytes)
   return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')
+}
+
+function text(value, fallback = '') {
+  return String(value ?? fallback).trim()
+}
+
+export function rememberFocusedOwner(owner) {
+  const profile = text(owner?.profile)
+  if (!profile) return
+  lastFocusedOwner = {
+    connectionId: text(owner?.connectionId),
+    profile
+  }
+}
+
+function focusedApiScope() {
+  const focusedOwner = host.state?.focusedSessionOwner?.get?.()
+  rememberFocusedOwner(focusedOwner)
+  const observedFocusedProfile = text(host.state?.focusedSessionProfile?.get?.())
+  const activeProfile = text(host.state?.profile?.get?.(), 'default') || 'default'
+  const activeConnectionId = text(host.state?.connectionId?.get?.())
+  const rememberedOwner = lastFocusedOwner
+  const rememberedMatchesFocus =
+    rememberedOwner &&
+    (!observedFocusedProfile || rememberedOwner.profile === observedFocusedProfile)
+  const scopedOwner = focusedOwner?.profile
+    ? focusedOwner
+    : (rememberedMatchesFocus ? rememberedOwner : null)
+  const focusedProfile = text(
+    focusedOwner?.profile,
+    observedFocusedProfile || scopedOwner?.profile || activeProfile
+  ) || activeProfile
+  const focusedConnectionId = text(scopedOwner?.connectionId)
+
+  if (
+    host.state?.focusedSessionOwner &&
+    host.state?.focusedSessionProfile &&
+    focusedProfile !== activeProfile &&
+    !scopedOwner?.profile
+  ) {
+    throw new Error('The focused session owner could not be resolved.')
+  }
+
+  return {
+    activeConnectionId,
+    activeProfile,
+    connectionId: focusedConnectionId || activeConnectionId,
+    profile: focusedProfile
+  }
+}
+
+function pluginApiSuffix(path) {
+  const suffix = String(path || '').startsWith('/') ? String(path) : `/${String(path || '')}`
+  const pathname = suffix.split(/[?#]/, 1)[0]
+  if (pathname.split('/').includes('..')) {
+    throw new Error(`Human Gate API path traversal rejected: ${path}`)
+  }
+  return suffix
+}
+
+async function restAtScope(ctx, scope, path, options = {}) {
+  const connectionMatches =
+    !scope.connectionId ||
+    scope.connectionId === scope.activeConnectionId ||
+    (scope.connectionId === 'local' && !scope.activeConnectionId)
+
+  if (scope.profile === scope.activeProfile && connectionMatches) {
+    return ctx.rest(path, options)
+  }
+
+  if (!window.hermesDesktop?.api) {
+    throw new Error('Hermes Desktop API bridge unavailable for the focused profile.')
+  }
+
+  const request = {
+    path: `/api/plugins/human-gate${pluginApiSuffix(path)}`,
+    profile: scope.profile
+  }
+  if (scope.connectionId) request.connectionId = scope.connectionId
+  if (options.method !== undefined) request.method = options.method
+  if (options.body !== undefined) request.body = options.body
+  if (options.upload !== undefined) request.upload = options.upload
+  if (options.timeoutMs !== undefined) request.timeoutMs = options.timeoutMs
+  return window.hermesDesktop.api(request)
+}
+
+function pluginNotFound(cause) {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  return message.includes('404') && message.toLowerCase().includes('plugin not found')
+}
+
+function httpNotFound(cause) {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  return /(^|\D)404(\D|$)/.test(message)
+}
+
+function sameApiScope(left, right) {
+  return left.profile === right.profile && left.connectionId === right.connectionId
+}
+
+async function discoverPluginScope(ctx, rejectedScope) {
+  if (resolvedPluginScope) return resolvedPluginScope
+  if (pluginScopeResolution) return pluginScopeResolution
+
+  pluginScopeResolution = (async () => {
+    if (typeof host.profileRoutes !== 'function') {
+      throw new Error('Human Gate could not inspect Hermes profile routes.')
+    }
+
+    const routes = await host.profileRoutes()
+    if (!Array.isArray(routes)) {
+      throw new Error('Hermes returned an invalid profile route list for Human Gate.')
+    }
+
+    const seen = new Set()
+    const candidates = []
+    for (const route of routes) {
+      const profile = text(route?.targetProfile, route?.profile)
+      if (!profile) continue
+      const candidate = {
+        activeConnectionId: rejectedScope.activeConnectionId,
+        activeProfile: rejectedScope.activeProfile,
+        connectionId: text(route?.connectionId),
+        profile
+      }
+      const key = `${candidate.connectionId}\u0000${candidate.profile}`
+      if (seen.has(key) || sameApiScope(candidate, rejectedScope)) continue
+      seen.add(key)
+      candidates.push(candidate)
+    }
+
+    const matches = []
+    for (const candidate of candidates) {
+      try {
+        await restAtScope(ctx, candidate, PROFILE_PROBE_PATH)
+        matches.push(candidate)
+      } catch (cause) {
+        if (!httpNotFound(cause)) throw cause
+      }
+    }
+
+    if (matches.length !== 1) {
+      throw new Error(
+        matches.length === 0
+          ? 'Human Gate is not enabled in any available Hermes profile.'
+          : 'Human Gate is enabled in more than one Hermes profile. Select its owning profile first.'
+      )
+    }
+    resolvedPluginScope = matches[0]
+    return resolvedPluginScope
+  })()
+
+  try {
+    return await pluginScopeResolution
+  } finally {
+    pluginScopeResolution = null
+  }
+}
+
+export async function profileRest(ctx, path, options = {}) {
+  const scope = focusedApiScope()
+  try {
+    return await restAtScope(ctx, scope, path, options)
+  } catch (cause) {
+    if (!pluginNotFound(cause)) throw cause
+  }
+
+  const pluginScope = await discoverPluginScope(ctx, scope)
+  return restAtScope(ctx, pluginScope, path, options)
+}
+
+function trackFocusedOwner(ctx) {
+  const ownerAtom = host.state?.focusedSessionOwner
+  rememberFocusedOwner(ownerAtom?.get?.())
+  const stop = ownerAtom?.listen?.(rememberFocusedOwner)
+  if (typeof stop === 'function' && typeof ctx.onDispose === 'function') {
+    ctx.onDispose(stop)
+  }
 }
 
 async function ensureOwner(ctx) {
@@ -23,7 +206,7 @@ async function ensureOwner(ctx) {
     token = randomOwnerToken()
     ctx.storage.set('ownerToken', token)
   }
-  await ctx.rest('/owner/register', {
+  await profileRest(ctx, '/owner/register', {
     method: 'POST',
     body: { token }
   })
@@ -37,8 +220,9 @@ function useRequests(ctx, states = ACTIVE_STATES) {
 
   const refresh = useCallback(async () => {
     try {
-      const result = await ctx.rest(`/requests?state=${encodeURIComponent(states)}&limit=200`)
-      setRequests(Array.isArray(result?.requests) ? result.requests : [])
+      const result = await profileRest(ctx, `/requests?state=${encodeURIComponent(states)}&limit=200`)
+      const fetched = Array.isArray(result?.requests) ? result.requests : []
+      setRequests(states === ACTIVE_STATES ? activeInboxRequests(fetched) : fetched)
       setError('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -95,6 +279,17 @@ export function approvalCancellationLabel(state) {
   return ''
 }
 
+export function activeInboxRequests(requests) {
+  if (!Array.isArray(requests)) return []
+  return requests.filter(request =>
+    request?.state !== 'cancelled' || ACTIVE_CANCELLED_RESUME_STATES.has(request?.resume_state)
+  )
+}
+
+export function retrySessionWakeLabel(request) {
+  return request?.resume_state === 'failed' ? 'Retry session wake' : ''
+}
+
 function DisplayProjection({ display }) {
   const entries = Object.entries(display || {})
   if (!entries.length) {
@@ -134,10 +329,31 @@ async function profileRoute(profile) {
   return matches[0]
 }
 
+function isSessionLimitRejection(cause) {
+  const seen = new Set()
+  let current = cause
+  for (let depth = 0; current && depth < 6 && !seen.has(current); depth += 1) {
+    if (typeof current === 'object') seen.add(current)
+    const code = Number(current?.code ?? current?.data?.code)
+    const message = current instanceof Error ? current.message : String(current?.message ?? current)
+    if (code === 4090 || /active session limit\s*\(\s*\d+\s*\/\s*\d+\s*\)/i.test(message)) {
+      return true
+    }
+    current = current?.cause ?? current?.data?.cause
+  }
+  return false
+}
+
 export async function submitResume(ctx, resume, token) {
   let release
   let wakeAttempted = false
+  let resumeResponded = false
+  let resumeAccepted = false
   try {
+    const prompt = typeof resume?.prompt === 'string' ? resume.prompt.trim() : ''
+    if (!prompt) {
+      throw new Error('Human Gate refused to deliver an empty decision prompt; a nonempty decision prompt is required.')
+    }
     const route = await profileRoute(resume.profile)
     release = await host.retainProfile(route)
     wakeAttempted = true
@@ -146,29 +362,42 @@ export async function submitResume(ctx, resume, token) {
       profile: route.targetProfile,
       omit_messages: true
     })
+    resumeResponded = true
     const runtimeSessionId = String(resumed?.session_id || '')
     const storedSessionId = String(resumed?.session_key || '')
     if (!runtimeSessionId) {
       throw new Error('The stored session resumed without an active runtime.')
     }
-    if (storedSessionId && storedSessionId !== resume.stored_session_id) {
-      throw new Error('The resumed runtime did not preserve the stored session lineage.')
+    if (!storedSessionId) {
+      throw new Error('The resumed runtime did not prove the stored session lineage.')
     }
+    await profileRest(ctx, `/requests/${resume.request_id}/resume-target`, {
+      method: 'POST',
+      body: { token, record_version: resume.record_version, session_id: storedSessionId }
+    })
+    resumeAccepted = true
     await host.requestProfile(route, 'prompt.submit', {
       session_id: runtimeSessionId,
-      prompt: [{ type: 'text', text: resume.prompt }],
+      text: prompt,
       display_kind: 'hidden'
     })
-    await ctx.rest(`/requests/${resume.request_id}/resume-ack`, {
+    await profileRest(ctx, `/requests/${resume.request_id}/resume-ack`, {
       method: 'POST',
-      body: { token }
+      body: { token, record_version: resume.record_version }
     })
   } catch (cause) {
-    if (!wakeAttempted) {
+    const causeMessage = cause instanceof Error ? cause.message : String(cause)
+    const preAcceptFailure =
+      !wakeAttempted || (resumeResponded && !resumeAccepted) || isSessionLimitRejection(cause)
+    if (preAcceptFailure) {
       try {
-        await ctx.rest(`/requests/${resume.request_id}/resume-failed`, {
+        await profileRest(ctx, `/requests/${resume.request_id}/resume-failed`, {
           method: 'POST',
-          body: { token }
+          body: {
+            token,
+            record_version: resume.record_version,
+            error: causeMessage || 'Hermes rejected the resume before accepting the decision prompt.'
+          }
         })
       } catch (recordCause) {
         const message = recordCause instanceof Error ? recordCause.message : String(recordCause)
@@ -280,7 +509,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
     setBusy(decision)
     setError('')
     try {
-      const result = await ctx.rest(`/requests/${request.id}/decision`, {
+      const result = await profileRest(ctx, `/requests/${request.id}/decision`, {
         method: 'POST',
         body: {
           token: ownerToken,
@@ -290,14 +519,12 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           record_version: request.record_version
         }
       })
-      if (decision === 'approve' || decision === 'comment') {
-        const instruction = await ctx.rest(`/requests/${request.id}/resume-instruction`, {
+      if (['approve', 'comment', 'deny', 'cancel'].includes(decision)) {
+        const instruction = await profileRest(ctx, `/requests/${request.id}/resume-instruction`, {
           method: 'POST',
           body: { token: ownerToken }
         })
         await submitResume(ctx, instruction.resume, ownerToken)
-      } else if (result.terminate) {
-        await terminateSession(result.terminate)
       }
       haptic(decision === 'approve' ? 'success' : 'tap')
       host.notify({
@@ -305,9 +532,9 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
         message: decision === 'approve'
           ? `Approved ${request.tool_name}; the originating session is resuming.`
           : decision === 'deny'
-            ? `Denied ${request.tool_name}; the originating session is stopped.`
+            ? `Denied ${request.tool_name}; the originating session is resuming with the decision.`
             : decision === 'cancel'
-              ? `Cancelled ${request.tool_name}; no session action was taken.`
+              ? `Cancelled ${request.tool_name}; the originating session is resuming with the decision.`
               : `Decision sent to the originating session.`
       })
       setComment('')
@@ -333,7 +560,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
     setBusy('resume')
     setError('')
     try {
-      const result = await ctx.rest(`/requests/${request.id}/resume-instruction`, {
+      const result = await profileRest(ctx, `/requests/${request.id}/resume-instruction`, {
         method: 'POST',
         body: { token: ownerToken }
       })
@@ -349,31 +576,9 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
   }, [ctx, onChanged, ownerToken, request.id])
 
 
-  const retryTermination = useCallback(async () => {
-    setBusy('terminate')
-    setError('')
-    try {
-      const result = await ctx.rest(`/requests/${request.id}/termination-instruction`, {
-        method: 'POST',
-        body: { token: ownerToken }
-      })
-      const closed = await terminateSession(result.terminate)
-      host.notify({
-        kind: 'success',
-        message: closed
-          ? 'The originating session is stopped.'
-          : 'The originating session was already stopped.'
-      })
-      await onChanged()
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setBusy('')
-    }
-  }, [ctx, onChanged, ownerToken, request.id])
-
   const pending = request.state === 'pending'
   const cancellationLabel = approvalCancellationLabel(request.state)
+  const retryLabel = retrySessionWakeLabel(request)
   return jsxs('article', {
     className: 'grid gap-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-4',
     children: [
@@ -455,24 +660,18 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
         onClick: () => void decide('cancel'),
         children: busy === 'cancel' ? 'Cancelling…' : cancellationLabel
       }),
-      request.resume_state === 'failed' && jsx('button', {
+      retryLabel && jsx('button', {
         type: 'button',
         className: 'w-fit rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm disabled:opacity-50',
         disabled: Boolean(busy),
         onClick: () => void retryResume(),
-        children: busy === 'resume' ? 'Waking session…' : 'Retry session wake'
+        children: busy === 'resume' ? 'Waking session…' : retryLabel
       }),
       request.resume_state === 'dispatching' && jsx('p', {
         className: 'text-xs text-(--ui-warning)',
         children: 'Session wake is in progress or uncertain. Human Gate will not retry it automatically.'
       }),
-      request.state === 'denied' && jsx('button', {
-        type: 'button',
-        className: 'w-fit rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm disabled:opacity-50',
-        disabled: Boolean(busy),
-        onClick: () => void retryTermination(),
-        children: busy === 'terminate' ? 'Stopping session…' : 'Ensure session stopped'
-      }),
+
       error && jsx('div', {
         role: 'alert',
         className: 'rounded bg-(--ui-danger-bg) px-2 py-1.5 text-xs text-(--ui-danger)',
@@ -583,6 +782,7 @@ export default {
   name: 'Human Gate',
   defaultEnabled: true,
   register(ctx) {
+    trackFocusedOwner(ctx)
     ctx.registerMany([
       {
         id: 'page',

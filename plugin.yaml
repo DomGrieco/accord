@@ -12,6 +12,7 @@ provides_tools:
   - human_gate_get
   - human_gate_demo_effect
   - human_gate_mock_publish
+  - x_create_post
 provides_hooks:
   - pre_tool_call
 provides_middleware:

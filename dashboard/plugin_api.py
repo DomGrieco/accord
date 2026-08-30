@@ -1,18 +1,46 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from human_gate.models import Decision, RequestRecord, RequestState
-from human_gate.paths import resolve_db_path
-from human_gate.store import ConflictError, GateStore
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_PACKAGE_DIR = _PLUGIN_ROOT / "human_gate"
+if not _PACKAGE_DIR.is_dir():
+    raise ImportError("Human Gate package is missing from the plugin root")
+
+_plugin_root_text = str(_PLUGIN_ROOT)
+sys.path[:] = [entry for entry in sys.path if entry != _plugin_root_text]
+sys.path.insert(0, _plugin_root_text)
+
+import human_gate as _human_gate  # noqa: E402
+
+_package_file = getattr(_human_gate, "__file__", None)
+if _package_file is None or not Path(_package_file).resolve().is_relative_to(_PLUGIN_ROOT):
+    raise ImportError("Human Gate resolved outside the plugin root")
+
+from human_gate.models import Decision, RequestRecord, RequestState  # noqa: E402
+from human_gate.paths import resolve_db_path  # noqa: E402
+from human_gate.store import ConflictError, GateStore  # noqa: E402
 
 
 class OwnerTokenBody(BaseModel):
     token: str = Field(min_length=32, max_length=4096)
+
+
+class ResumeAttemptBody(OwnerTokenBody):
+    record_version: int = Field(ge=1)
+
+
+class ResumeFailedBody(ResumeAttemptBody):
+    error: str = Field(min_length=1, max_length=2000)
+
+
+class ResumeTargetBody(ResumeAttemptBody):
+    session_id: str = Field(min_length=1, max_length=256)
 
 
 class DecisionBody(OwnerTokenBody):
@@ -38,6 +66,7 @@ def _record(record: RequestRecord, audit: list[dict[str, Any]]) -> dict[str, obj
         "display": record.display,
         "state": record.state.value,
         "resume_state": record.resume_state.value,
+        "resume_error": record.resume_error,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
         "audit": audit,
@@ -45,41 +74,55 @@ def _record(record: RequestRecord, audit: list[dict[str, Any]]) -> dict[str, obj
 
 
 def _resume_prompt(record: RequestRecord, decision: Decision, comment: str) -> str:
+    owner_words = comment.strip()
     if decision is Decision.APPROVE:
-        return (
+        prompt = (
             f"Human Gate request {record.id} was approved by the owner. "
             "Retry the exact original tool call once without changing its arguments. "
             "Do not improvise another consequential action."
         )
-    return (
-        f"Human Gate request {record.id} needs changes from the owner. "
-        f"Owner comment: {comment.strip()} "
-        "Revise the proposal. Any new consequential tool call requires a new approval."
-    )
+    elif decision is Decision.COMMENT:
+        prompt = (
+            f"Human Gate request {record.id} needs changes from the owner. "
+            f"Owner comment: {owner_words} "
+            "Revise the proposal. Do not replay the old call or its digest. "
+            "Any revised consequential tool call requires a new approval request."
+        )
+    elif decision is Decision.DENY:
+        prompt = f"Human Gate request {record.id} was denied by the owner. Do not execute it."
+    else:
+        prompt = f"Human Gate request {record.id} was cancelled. Do not execute it."
+    if owner_words and decision is not Decision.COMMENT:
+        prompt = f"{prompt} Owner reason: {owner_words}"
+    if not prompt.strip():
+        raise ValueError("decision prompt must not be empty")
+    return prompt
 
 
-def _resume(
-    record: RequestRecord, decision: Decision, comment: str
-) -> dict[str, str] | None:
-    if decision not in {Decision.APPROVE, Decision.COMMENT}:
-        return None
+def _decision_envelope(record: RequestRecord, decision: Decision, comment: str) -> dict[str, str]:
     return {
-        "stored_session_id": record.session_lineage,
+        "stored_session_id": record.session_id,
+        "profile": record.profile,
+        "request_id": record.id,
+        "decision": decision.value,
+        "prompt": _resume_prompt(record, decision, comment),
+    }
+
+
+def _resume(record: RequestRecord, decision: Decision, comment: str) -> dict[str, str | int] | None:
+    return {
+        "stored_session_id": record.session_id,
         "profile": record.profile,
         "display_kind": "hidden",
         "request_id": record.id,
+        "record_version": record.record_version,
         "prompt": _resume_prompt(record, decision, comment),
     }
 
 
 def _terminate(record: RequestRecord, decision: Decision) -> dict[str, str] | None:
-    if decision is not Decision.DENY:
-        return None
-    return {
-        "stored_session_id": record.session_lineage,
-        "profile": record.profile,
-        "request_id": record.id,
-    }
+    del record, decision
+    return None
 
 
 def _authorize(store: GateStore, token: str) -> None:
@@ -149,30 +192,57 @@ def build_router(path: str | Path) -> APIRouter:
                 "request": _record(record, store.audit_history(record.id)),
                 "resume": None,
                 "terminate": _terminate(record, decision),
+                "decision_envelope": _decision_envelope(record, decision, body.comment),
             }
         finally:
             store.close()
 
     @api.post("/requests/{request_id}/resume-ack")
-    async def resume_ack(request_id: str, body: OwnerTokenBody) -> dict[str, object]:
+    async def resume_ack(request_id: str, body: ResumeAttemptBody) -> dict[str, object]:
         store = GateStore(db_path)
         try:
             _authorize(store, body.token)
             try:
-                record = store.mark_resume_delivered(request_id)
+                record = store.mark_resume_delivered(
+                    request_id,
+                    expected_record_version=body.record_version,
+                )
             except ConflictError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return {"request": _record(record, store.audit_history(record.id))}
         finally:
             store.close()
 
-    @api.post("/requests/{request_id}/resume-failed")
-    async def resume_failed(request_id: str, body: OwnerTokenBody) -> dict[str, object]:
+    @api.post("/requests/{request_id}/resume-target")
+    async def resume_target(request_id: str, body: ResumeTargetBody) -> dict[str, object]:
         store = GateStore(db_path)
         try:
             _authorize(store, body.token)
             try:
-                record = store.mark_resume_failed(request_id)
+                lineage = store.register_session_continuation(
+                    request_id,
+                    body.session_id,
+                    expected_record_version=body.record_version,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="request not found") from exc
+            except ConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return {"request_id": request_id, "session_id": body.session_id, "lineage": lineage}
+        finally:
+            store.close()
+
+    @api.post("/requests/{request_id}/resume-failed")
+    async def resume_failed(request_id: str, body: ResumeFailedBody) -> dict[str, object]:
+        store = GateStore(db_path)
+        try:
+            _authorize(store, body.token)
+            try:
+                record = store.mark_resume_failed(
+                    request_id,
+                    error=body.error,
+                    expected_record_version=body.record_version,
+                )
             except ConflictError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return {"request": _record(record, store.audit_history(record.id))}
@@ -180,9 +250,7 @@ def build_router(path: str | Path) -> APIRouter:
             store.close()
 
     @api.post("/requests/{request_id}/resume-instruction")
-    async def resume_instruction(
-        request_id: str, body: OwnerTokenBody
-    ) -> dict[str, object]:
+    async def resume_instruction(request_id: str, body: OwnerTokenBody) -> dict[str, object]:
         store = GateStore(db_path)
         try:
             _authorize(store, body.token)
@@ -202,9 +270,7 @@ def build_router(path: str | Path) -> APIRouter:
             store.close()
 
     @api.post("/requests/{request_id}/termination-instruction")
-    async def termination_instruction(
-        request_id: str, body: OwnerTokenBody
-    ) -> dict[str, object]:
+    async def termination_instruction(request_id: str, body: OwnerTokenBody) -> dict[str, object]:
         store = GateStore(db_path)
         try:
             _authorize(store, body.token)

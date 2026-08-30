@@ -5,7 +5,7 @@ from threading import Barrier, Event, Lock, Thread
 
 import pytest
 
-from human_gate.models import Decision, RequestState
+from human_gate.models import Decision, RequestState, ResumeState
 from human_gate.store import ConflictError, GateStore
 
 
@@ -22,17 +22,15 @@ def create_request(store: GateStore, *, digest: str = "digest-a"):
     )
 
 
-def test_runtime_lock_prevents_concurrent_recovery_owner(tmp_path: Path) -> None:
+def test_runtime_leases_allow_concurrent_hermes_processes(tmp_path: Path) -> None:
     path = tmp_path / "gate.db"
     first = GateStore(path)
     second = GateStore(path)
-    first.acquire_runtime_lock()
 
-    with pytest.raises(RuntimeError, match="already active"):
-        second.acquire_runtime_lock()
+    first.acquire_runtime_lock()
+    second.acquire_runtime_lock()
 
     first.close()
-    second.acquire_runtime_lock()
     second.close()
 
 
@@ -375,6 +373,51 @@ def test_comment_requires_text(tmp_path: Path) -> None:
         store.decide(request.id, Decision.COMMENT, actor_id="owner", comment="  ")
 
 
+def test_stale_resume_attempt_cannot_ack_or_fail_a_new_attempt(tmp_path: Path) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    store.decide(request.id, Decision.APPROVE, actor_id="owner")
+    first = store.begin_resume_delivery(request.id)
+    store.mark_resume_failed(
+        request.id,
+        error="session limit",
+        expected_record_version=first.record_version,
+    )
+    second = store.begin_resume_delivery(request.id)
+
+    with pytest.raises(ConflictError, match="dispatching resume attempt"):
+        store.mark_resume_delivered(
+            request.id,
+            expected_record_version=first.record_version,
+        )
+    with pytest.raises(ConflictError, match="dispatching resume attempt"):
+        store.mark_resume_failed(
+            request.id,
+            error="stale failure",
+            expected_record_version=first.record_version,
+        )
+    with pytest.raises(ConflictError, match="dispatching resume attempt"):
+        store.register_session_continuation(
+            request.id,
+            "stale-continuation",
+            expected_record_version=first.record_version,
+        )
+
+    assert (
+        store.register_session_continuation(
+            request.id,
+            "current-continuation",
+            expected_record_version=second.record_version,
+        )
+        == "session-stored"
+    )
+    delivered = store.mark_resume_delivered(
+        request.id,
+        expected_record_version=second.record_version,
+    )
+    assert delivered.resume_state is ResumeState.DELIVERED
+
+
 def test_second_decision_is_rejected(tmp_path: Path) -> None:
     store = GateStore(tmp_path / "gate.db")
     request = create_request(store)
@@ -385,15 +428,66 @@ def test_second_decision_is_rejected(tmp_path: Path) -> None:
 
 
 def test_stale_claim_recovery_is_uncertain(tmp_path: Path) -> None:
-    store = GateStore(tmp_path / "gate.db")
+    path = tmp_path / "gate.db"
+    store = GateStore(path)
     request = create_request(store)
     store.decide(request.id, Decision.APPROVE, actor_id="owner")
     assert store.claim(request.id, expected_digest="digest-a") is True
+    store.close()
 
-    recovered = store.recover_claimed_as_uncertain()
+    restarted = GateStore(path)
+    restarted.acquire_runtime_lock()
+    recovered = restarted.recover_claimed_as_uncertain()
 
     assert recovered == 1
-    assert store.get_request(request.id).state is RequestState.UNCERTAIN
+    recovered_request = restarted.get_request(request.id)
+    assert recovered_request is not None
+    assert recovered_request.state is RequestState.UNCERTAIN
+
+
+def test_live_claim_owner_is_not_recovered_by_another_runtime(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    owner = GateStore(path)
+    request = create_request(owner)
+    owner.decide(request.id, Decision.APPROVE, actor_id="owner")
+    assert owner.claim(request.id, expected_digest="digest-a") is True
+
+    observer = GateStore(path)
+    observer.acquire_runtime_lock()
+
+    assert observer.recover_claimed_as_uncertain() == 0
+    observed_request = observer.get_request(request.id)
+    assert observed_request is not None
+    assert observed_request.state is RequestState.CLAIMED
+
+
+def test_verified_false_delivered_resume_can_be_requeued_with_owner_visible_error(
+    tmp_path: Path,
+) -> None:
+    store = GateStore(tmp_path / "gate.db")
+    request = create_request(store)
+    decided = store.decide(
+        request.id,
+        Decision.COMMENT,
+        actor_id="owner",
+        comment="Change only the ending.",
+    )
+    attempt = store.begin_resume_delivery(decided.id)
+    store.mark_resume_delivered(
+        decided.id,
+        expected_record_version=attempt.record_version,
+    )
+
+    repaired = store.requeue_verified_undelivered_resume(
+        decided.id,
+        error="Verified legacy delivery wrote an empty prompt; retry is queued.",
+    )
+
+    assert repaired.state is RequestState.CHANGES_REQUESTED
+    assert repaired.resume_state is ResumeState.FAILED
+    assert (
+        repaired.resume_error == "Verified legacy delivery wrote an empty prompt; retry is queued."
+    )
 
 
 def test_owner_token_is_registered_once_and_verified_without_storing_plaintext(

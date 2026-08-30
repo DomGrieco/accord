@@ -90,6 +90,7 @@ def _unlock_runtime_file(handle: BinaryIO) -> None:
 class GateStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
+        self._runtime_id = uuid.uuid4().hex
         self._runtime_lock: BinaryIO | None = None
         self._connection_lock = RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +110,7 @@ class GateStore:
     def acquire_runtime_lock(self) -> None:
         if self._runtime_lock is not None:
             return
-        lock_path = self.path.with_name(f"{self.path.name}.runtime.lock")
+        lock_path = self._runtime_lock_path(self._runtime_id)
         handle = lock_path.open("a+b")
         try:
             handle.seek(0, os.SEEK_END)
@@ -121,6 +122,30 @@ class GateStore:
             handle.close()
             raise
         self._runtime_lock = handle
+
+    def _runtime_lock_path(self, runtime_id: str) -> Path:
+        return self.path.with_name(f"{self.path.name}.runtime.{runtime_id}.lock")
+
+    def _runtime_owner_is_active(self, runtime_id: str) -> bool:
+        if len(runtime_id) != 32 or any(
+            character not in "0123456789abcdef" for character in runtime_id
+        ):
+            return False
+        if runtime_id == self._runtime_id and self._runtime_lock is not None:
+            return True
+        lock_path = self._runtime_lock_path(runtime_id)
+        if not lock_path.is_file():
+            return False
+        handle = lock_path.open("r+b")
+        try:
+            try:
+                _lock_runtime_file(handle)
+            except RuntimeError:
+                return True
+            _unlock_runtime_file(handle)
+            return False
+        finally:
+            handle.close()
 
     @_serialized
     def close(self) -> None:
@@ -153,10 +178,12 @@ class GateStore:
                 replay_json TEXT NOT NULL,
                 state TEXT NOT NULL,
                 resume_state TEXT NOT NULL,
+                resume_error TEXT,
                 supersedes_request_id TEXT REFERENCES requests(id),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 claimed_at TEXT,
+                claim_owner_id TEXT,
                 completed_at TEXT
             );
 
@@ -198,6 +225,15 @@ class GateStore:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS session_lineages (
+                profile TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                lineage_root TEXT NOT NULL,
+                request_id TEXT NOT NULL REFERENCES requests(id),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(profile, session_id)
+            );
+
             CREATE TABLE IF NOT EXISTS mock_publications (
                 idempotency_digest TEXT PRIMARY KEY,
                 payload_digest TEXT NOT NULL,
@@ -214,6 +250,10 @@ class GateStore:
             self._connection.execute(
                 "ALTER TABLE requests ADD COLUMN record_version INTEGER NOT NULL DEFAULT 1"
             )
+        if "claim_owner_id" not in columns:
+            self._connection.execute("ALTER TABLE requests ADD COLUMN claim_owner_id TEXT")
+        if "resume_error" not in columns:
+            self._connection.execute("ALTER TABLE requests ADD COLUMN resume_error TEXT")
 
     @_serialized
     def record_mock_publication(self, idempotency_key: str, payload_digest: str) -> MockPublication:
@@ -330,6 +370,7 @@ class GateStore:
             replay_json=str(row["replay_json"]),
             state=RequestState(str(row["state"])),
             resume_state=ResumeState(str(row["resume_state"])),
+            resume_error=(str(row["resume_error"]) if row["resume_error"] is not None else None),
             supersedes_request_id=(
                 str(row["supersedes_request_id"])
                 if row["supersedes_request_id"] is not None
@@ -462,6 +503,26 @@ class GateStore:
         return self._record(row)
 
     @_serialized
+    def find_matching_claimed(
+        self,
+        *,
+        profile: str,
+        session_lineage: str,
+        tool_name: str,
+        call_digest: str,
+    ) -> RequestRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT * FROM requests
+            WHERE profile = ? AND session_lineage = ? AND tool_name = ?
+              AND call_digest = ? AND state = 'claimed'
+            ORDER BY updated_at ASC LIMIT 1
+            """,
+            (profile, session_lineage, tool_name, call_digest),
+        ).fetchone()
+        return self._record(row)
+
+    @_serialized
     def decide(
         self,
         request_id: str,
@@ -482,11 +543,7 @@ class GateStore:
             Decision.COMMENT: RequestState.CHANGES_REQUESTED,
             Decision.CANCEL: RequestState.CANCELLED,
         }[decision]
-        resume_state = (
-            ResumeState.PENDING
-            if decision in {Decision.APPROVE, Decision.COMMENT}
-            else ResumeState.NOT_REQUESTED
-        )
+        resume_state = ResumeState.PENDING
         now = _now()
         try:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -542,47 +599,84 @@ class GateStore:
         return record
 
     @_serialized
-    def mark_resume_delivered(self, request_id: str) -> RequestRecord:
+    def mark_resume_delivered(
+        self, request_id: str, *, expected_record_version: int
+    ) -> RequestRecord:
         now = _now()
         updated = self._connection.execute(
             """
-            UPDATE requests SET resume_state = ?, updated_at = ?
-            WHERE id = ? AND resume_state = ?
+            UPDATE requests SET resume_state = ?, resume_error = NULL, updated_at = ?
+            WHERE id = ? AND resume_state = ? AND record_version = ?
             """,
             (
                 ResumeState.DELIVERED.value,
                 now,
                 request_id,
                 ResumeState.DISPATCHING.value,
+                expected_record_version,
             ),
         )
         if updated.rowcount != 1:
-            raise ConflictError("request does not have a dispatching resume")
+            raise ConflictError("request does not have the expected dispatching resume attempt")
         record = self.get_request(request_id)
         if record is None:
             raise RuntimeError("resumed request disappeared")
         return record
 
     @_serialized
-    def mark_resume_failed(self, request_id: str) -> RequestRecord:
+    def mark_resume_failed(
+        self, request_id: str, *, error: str, expected_record_version: int
+    ) -> RequestRecord:
+        normalized_error = error.strip()
+        if not normalized_error:
+            raise ValueError("resume error is required")
+        if len(normalized_error) > 2000:
+            normalized_error = normalized_error[:2000]
         now = _now()
         updated = self._connection.execute(
             """
-            UPDATE requests SET resume_state = ?, updated_at = ?
-            WHERE id = ? AND resume_state = ?
+            UPDATE requests SET resume_state = ?, resume_error = ?, updated_at = ?
+            WHERE id = ? AND resume_state = ? AND record_version = ?
             """,
             (
                 ResumeState.FAILED.value,
+                normalized_error,
                 now,
                 request_id,
                 ResumeState.DISPATCHING.value,
+                expected_record_version,
             ),
         )
         if updated.rowcount != 1:
-            raise ConflictError("request does not have a dispatching resume")
+            raise ConflictError("request does not have the expected dispatching resume attempt")
         record = self.get_request(request_id)
         if record is None:
             raise RuntimeError("failed-resume request disappeared")
+        return record
+
+    @_serialized
+    def requeue_verified_undelivered_resume(self, request_id: str, *, error: str) -> RequestRecord:
+        """Repair a legacy false-positive delivery after external evidence proves no prompt landed."""
+        normalized_error = error.strip()
+        if not normalized_error:
+            raise ValueError("resume error is required")
+        now = _now()
+        updated = self._connection.execute(
+            """
+            UPDATE requests
+            SET resume_state = ?, resume_error = ?, updated_at = ?,
+                record_version = record_version + 1
+            WHERE id = ?
+              AND state IN ('approved', 'changes_requested')
+              AND resume_state = 'delivered'
+            """,
+            (ResumeState.FAILED.value, normalized_error[:2000], now, request_id),
+        )
+        if updated.rowcount != 1:
+            raise ConflictError("request does not have a verified delivered resume to repair")
+        record = self.get_request(request_id)
+        if record is None:
+            raise RuntimeError("requeued resume request disappeared")
         return record
 
     @_serialized
@@ -593,9 +687,10 @@ class GateStore:
             updated = self._connection.execute(
                 """
                 UPDATE requests
-                SET resume_state = ?, updated_at = ?, record_version = record_version + 1
+                SET resume_state = ?, resume_error = NULL, updated_at = ?,
+                    record_version = record_version + 1
                 WHERE id = ?
-                  AND state IN ('approved', 'changes_requested')
+                  AND state IN ('approved', 'changes_requested', 'denied', 'cancelled')
                   AND resume_state IN ('pending', 'failed')
                 """,
                 (ResumeState.DISPATCHING.value, now, request_id),
@@ -624,6 +719,68 @@ class GateStore:
         if row is None:
             return None
         return Decision(str(row["decision"])), str(row["comment"])
+
+    @_serialized
+    def register_session_continuation(
+        self,
+        request_id: str,
+        session_id: str,
+        *,
+        expected_record_version: int,
+    ) -> str:
+        normalized = session_id.strip()
+        if not normalized:
+            raise ValueError("continuation session_id is required")
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                """
+                SELECT profile, session_lineage FROM requests
+                WHERE id = ? AND resume_state = ? AND record_version = ?
+                """,
+                (
+                    request_id,
+                    ResumeState.DISPATCHING.value,
+                    expected_record_version,
+                ),
+            ).fetchone()
+            if row is None:
+                exists = self._connection.execute(
+                    "SELECT 1 FROM requests WHERE id = ?", (request_id,)
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(request_id)
+                raise ConflictError("request does not have the expected dispatching resume attempt")
+            profile = str(row["profile"])
+            session_lineage = str(row["session_lineage"])
+            existing = self._connection.execute(
+                "SELECT lineage_root FROM session_lineages WHERE profile = ? AND session_id = ?",
+                (profile, normalized),
+            ).fetchone()
+            if existing is not None and str(existing["lineage_root"]) != session_lineage:
+                raise ConflictError("continuation session already belongs to another lineage")
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO session_lineages(
+                    profile, session_id, lineage_root, request_id, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (profile, normalized, session_lineage, request_id, _now()),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        return session_lineage
+
+    @_serialized
+    def resolve_session_lineage(self, profile: str, session_id: str) -> str:
+        row = self._connection.execute(
+            "SELECT lineage_root FROM session_lineages WHERE profile = ? AND session_id = ?",
+            (profile, session_id),
+        ).fetchone()
+        return str(row["lineage_root"]) if row is not None else session_id
 
     @_serialized
     def audit_history(self, request_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
@@ -684,16 +841,17 @@ class GateStore:
 
     @_serialized
     def claim(self, request_id: str, *, expected_digest: str) -> bool:
+        self.acquire_runtime_lock()
         now = _now()
         try:
             self._connection.execute("BEGIN IMMEDIATE")
             updated = self._connection.execute(
                 """
                 UPDATE requests
-                SET state = 'claimed', claimed_at = ?, updated_at = ?
+                SET state = 'claimed', claimed_at = ?, claim_owner_id = ?, updated_at = ?
                 WHERE id = ? AND state = 'approved' AND call_digest = ?
                 """,
-                (now, now, request_id, expected_digest),
+                (now, self._runtime_id, now, request_id, expected_digest),
             )
             self._connection.execute("COMMIT")
             return updated.rowcount == 1
@@ -721,7 +879,7 @@ class GateStore:
             updated = self._connection.execute(
                 """
                 UPDATE requests
-                SET state = ?, completed_at = ?, updated_at = ?
+                SET state = ?, claim_owner_id = NULL, completed_at = ?, updated_at = ?
                 WHERE id = ? AND state = 'claimed'
                 """,
                 (state.value, now, now, request_id),
@@ -746,6 +904,95 @@ class GateStore:
         return record
 
     @_serialized
+    def reconcile_executed_x_create_post_as_uncertain(
+        self, request_id: str, *, expected_receipt_digest: str
+    ) -> RequestRecord:
+        """Repair one known false EXECUTED result without granting new execution authority."""
+        if len(expected_receipt_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_receipt_digest
+        ):
+            raise ValueError("expected_receipt_digest must be a lowercase SHA-256 digest")
+        now = _now()
+        reconciliation_result = call_digest({"reconciled": "registry_normalized_tool_error"})
+        reconciliation_display = _bounded_json(
+            {"error_type": "RegistryNormalizedToolError"}, field="receipt display"
+        )
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            request = self._connection.execute(
+                "SELECT tool_name, effect_kind, state FROM requests WHERE id = ?",
+                (request_id,),
+            ).fetchone()
+            receipts = self._connection.execute(
+                "SELECT id, outcome, result_digest, display_json FROM receipts WHERE request_id = ? "
+                "ORDER BY created_at ASC, id ASC",
+                (request_id,),
+            ).fetchall()
+            request_shape_valid = (
+                request is not None
+                and str(request["tool_name"]) == "x_create_post"
+                and str(request["effect_kind"]) == "publish"
+            )
+            request_state = str(request["state"]) if request is not None else ""
+            already_reconciled = (
+                request_shape_valid
+                and request_state == RequestState.UNCERTAIN.value
+                and len(receipts) == 2
+                and str(receipts[0]["outcome"]) == RequestState.EXECUTED.value
+                and str(receipts[0]["result_digest"]) == expected_receipt_digest
+                and str(receipts[1]["outcome"]) == RequestState.UNCERTAIN.value
+                and str(receipts[1]["result_digest"]) == reconciliation_result
+                and str(receipts[1]["display_json"]) == reconciliation_display
+            )
+            if already_reconciled:
+                self._connection.execute("COMMIT")
+                record = self.get_request(request_id)
+                if record is None:
+                    raise RuntimeError("reconciled request disappeared")
+                return record
+            valid = (
+                request_shape_valid
+                and request_state == RequestState.EXECUTED.value
+                and len(receipts) == 1
+                and str(receipts[0]["outcome"]) == RequestState.EXECUTED.value
+                and str(receipts[0]["result_digest"]) == expected_receipt_digest
+            )
+            if not valid:
+                raise ConflictError(
+                    "request is not exactly one historical executed x_create_post request/receipt"
+                )
+            updated_request = self._connection.execute(
+                """
+                UPDATE requests
+                SET state = 'uncertain', claim_owner_id = NULL, completed_at = ?, updated_at = ?,
+                    record_version = record_version + 1
+                WHERE id = ? AND state = 'executed' AND tool_name = 'x_create_post'
+                  AND effect_kind = 'publish'
+                """,
+                (now, now, request_id),
+            )
+            updated_receipt = self._connection.execute(
+                """
+                INSERT INTO receipts(id, request_id, outcome, result_digest, display_json, created_at)
+                VALUES (?, ?, 'uncertain', ?, ?, ?)
+                """,
+                (uuid.uuid4().hex, request_id, reconciliation_result, reconciliation_display, now),
+            )
+            if updated_request.rowcount != 1 or updated_receipt.rowcount != 1:
+                raise ConflictError(
+                    "request is not exactly one historical executed x_create_post request/receipt"
+                )
+            self._connection.execute("COMMIT")
+        except Exception:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        record = self.get_request(request_id)
+        if record is None:
+            raise RuntimeError("reconciled request disappeared")
+        return record
+
+    @_serialized
     def set_resume_state(self, request_id: str, state: ResumeState) -> RequestRecord:
         now = _now()
         updated = self._connection.execute(
@@ -761,21 +1008,32 @@ class GateStore:
 
     @_serialized
     def recover_claimed_as_uncertain(self) -> int:
+        self.acquire_runtime_lock()
         now = _now()
+        candidates = self._connection.execute(
+            "SELECT id, claim_owner_id FROM requests WHERE state = 'claimed'"
+        ).fetchall()
+        stale = [
+            (str(row["id"]), str(row["claim_owner_id"] or ""))
+            for row in candidates
+            if not self._runtime_owner_is_active(str(row["claim_owner_id"] or ""))
+        ]
         try:
             self._connection.execute("BEGIN IMMEDIATE")
-            rows = self._connection.execute(
-                "SELECT id FROM requests WHERE state = 'claimed'"
-            ).fetchall()
-            for row in rows:
-                request_id = str(row["id"])
-                self._connection.execute(
+            recovered = 0
+            for request_id, owner_id in stale:
+                updated = self._connection.execute(
                     """
-                    UPDATE requests SET state = 'uncertain', completed_at = ?, updated_at = ?
+                    UPDATE requests
+                    SET state = 'uncertain', claim_owner_id = NULL,
+                        completed_at = ?, updated_at = ?
                     WHERE id = ? AND state = 'claimed'
+                      AND COALESCE(claim_owner_id, '') = ?
                     """,
-                    (now, now, request_id),
+                    (now, now, request_id, owner_id),
                 )
+                if updated.rowcount != 1:
+                    continue
                 self._connection.execute(
                     """
                     INSERT INTO receipts(id, request_id, outcome, result_digest, display_json, created_at)
@@ -783,8 +1041,9 @@ class GateStore:
                     """,
                     (uuid.uuid4().hex, request_id, call_digest({"recovered": True}), now),
                 )
+                recovered += 1
             self._connection.execute("COMMIT")
-            return len(rows)
+            return recovered
         except Exception:
             if self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
