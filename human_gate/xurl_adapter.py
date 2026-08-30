@@ -6,7 +6,6 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from .claims import consume_active_claim
@@ -15,6 +14,7 @@ from .errors import EffectDefinitiveFailureError, EffectUncertainError
 _X_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 _XURL_APP_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _POST_ID_RE = re.compile(r"^[0-9]{1,32}$")
+_DYNAMIC_XURL_RE = re.compile(r"(?<![A-Za-z0-9_])xurl(?![A-Za-z0-9_./-])", re.IGNORECASE)
 _XURL_WRITE_ACTIONS = {
     "auth",
     "block",
@@ -39,6 +39,11 @@ _XURL_WRITE_ACTIONS = {
     "webhook",
 }
 _SHELL_CONTROL_CHARS = frozenset(";&|><\n\r\x00`$")
+
+
+def _is_xurl_executable(token: str) -> bool:
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name in {"xurl", "xurl.exe"}
 
 
 @dataclass(frozen=True)
@@ -77,7 +82,7 @@ def parse_terminal_xurl_write(args: dict[str, Any]) -> TerminalXurlWrite | None:
         argv = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if not argv or Path(argv[0]).name != "xurl":
+    if not argv or not _is_xurl_executable(argv[0]):
         return None
     app: str | None = None
     account: str | None = None
@@ -155,9 +160,9 @@ def terminal_xurl_write_is_unsupported(args: dict[str, Any]) -> bool:
         return "xurl" in lowered
     if not argv:
         return False
-    xurl_positions = [index for index, token in enumerate(argv) if Path(token).name == "xurl"]
+    xurl_positions = [index for index, token in enumerate(argv) if _is_xurl_executable(token)]
     if not xurl_positions:
-        if "xurl" not in lowered:
+        if _DYNAMIC_XURL_RE.search(command) is None:
             return False
         shell_dynamic = (
             any(char in command for char in _SHELL_CONTROL_CHARS)

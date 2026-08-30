@@ -286,6 +286,48 @@ export function activeInboxRequests(requests) {
   )
 }
 
+function approvalSearchText(request) {
+  const display = Object.values(request?.display || {})
+    .map(value => typeof value === 'string' ? value : JSON.stringify(value))
+    .join(' ')
+  return [
+    request?.id,
+    request?.tool_name,
+    request?.profile,
+    request?.effect_kind,
+    request?.state,
+    request?.resume_state,
+    display
+  ].map(value => String(value || '').toLowerCase()).join(' ')
+}
+
+export function filterAndSortRequests(requests, options = {}) {
+  if (!Array.isArray(requests)) return []
+  const query = String(options.query || '').trim().toLowerCase()
+  const state = String(options.state || 'all')
+  const effect = String(options.effect || 'all')
+  const sort = String(options.sort || 'newest')
+  const filtered = requests.filter(request =>
+    (!query || approvalSearchText(request).includes(query)) &&
+    (state === 'all' || request?.state === state) &&
+    (effect === 'all' || request?.effect_kind === effect)
+  )
+  return filtered.slice().sort((left, right) => {
+    if (sort === 'oldest') {
+      return String(left?.created_at || '').localeCompare(String(right?.created_at || ''))
+    }
+    if (sort === 'tool') {
+      return String(left?.tool_name || '').localeCompare(String(right?.tool_name || '')) ||
+        String(right?.created_at || '').localeCompare(String(left?.created_at || ''))
+    }
+    if (sort === 'state') {
+      return String(left?.state || '').localeCompare(String(right?.state || '')) ||
+        String(right?.created_at || '').localeCompare(String(left?.created_at || ''))
+    }
+    return String(right?.created_at || '').localeCompare(String(left?.created_at || ''))
+  })
+}
+
 export function retrySessionWakeLabel(request) {
   return request?.resume_state === 'failed' ? 'Retry session wake' : ''
 }
@@ -681,13 +723,362 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
   })
 }
 
+function requestPreview(request) {
+  const entries = Object.entries(request?.display || {})
+  if (!entries.length) return 'No display metadata'
+  const [key, value] = entries[0]
+  const rendered = typeof value === 'string' ? value : JSON.stringify(value)
+  const clipped = rendered.length > 120 ? `${rendered.slice(0, 117)}…` : rendered
+  return `${key.replaceAll('_', ' ')}: ${clipped}`
+}
+
+function ApprovalTableEntry({ ctx, request, ownerToken, onChanged, expanded, onToggle }) {
+  return jsxs('tbody', {
+    className: 'border-t border-(--ui-stroke-secondary)',
+    children: [
+      jsxs('tr', {
+        className: 'align-middle hover:bg-(--ui-surface-secondary)',
+        children: [
+          jsx('td', { className: 'whitespace-nowrap px-3 py-2', children: jsx(StateBadge, { state: request.state }) }),
+          jsxs('td', {
+            className: 'min-w-40 px-3 py-2',
+            children: [
+              jsx('div', { className: 'text-sm font-medium', children: request.tool_name }),
+              jsx('div', { className: 'font-mono text-[0.6875rem] text-(--ui-text-tertiary)', children: request.id.slice(0, 12) })
+            ]
+          }),
+          jsxs('td', {
+            className: 'whitespace-nowrap px-3 py-2 text-xs text-(--ui-text-secondary)',
+            children: [
+              jsx('div', { children: request.profile }),
+              jsx('div', { className: 'text-(--ui-text-tertiary)', children: request.effect_kind })
+            ]
+          }),
+          jsx('td', {
+            className: 'max-w-xl px-3 py-2 text-xs text-(--ui-text-secondary)',
+            children: jsx('div', { className: 'truncate', title: requestPreview(request), children: requestPreview(request) })
+          }),
+          jsx('td', {
+            className: 'whitespace-nowrap px-3 py-2 text-xs text-(--ui-text-tertiary)',
+            children: new Date(request.created_at).toLocaleString()
+          }),
+          jsx('td', {
+            className: 'px-3 py-2 text-right',
+            children: jsx('button', {
+              type: 'button',
+              className: 'rounded border border-(--ui-stroke-secondary) px-2 py-1 text-xs',
+              onClick: onToggle,
+              'aria-expanded': expanded,
+              children: expanded ? 'Close' : 'Review'
+            })
+          })
+        ]
+      }),
+      expanded && jsx('tr', {
+        children: jsx('td', {
+          colSpan: 6,
+          className: 'bg-(--ui-surface-secondary) p-3',
+          children: jsx(ApprovalCard, { ctx, request, ownerToken, onChanged })
+        })
+      })
+    ]
+  })
+}
+
+function listText(value) {
+  return Array.isArray(value) ? value.join(', ') : ''
+}
+
+function parseListText(value) {
+  return String(value || '')
+    .split(/[\n,]/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function PolicyEditor({ policy, index, onChange, onRemove }) {
+  const selectorType = Object.hasOwn(policy, 'tool_glob') ? 'glob' : 'exact'
+  const selector = selectorType === 'glob' ? policy.tool_glob : policy.tool_name
+  const terminalPolicy = selector === 'terminal'
+  const inputClass = 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1.5 text-sm outline-none focus:border-(--ui-accent)'
+  const updateSelectorType = event => {
+    const next = { ...policy }
+    delete next.tool_name
+    delete next.tool_glob
+    next[event.target.value === 'glob' ? 'tool_glob' : 'tool_name'] = ''
+    delete next.command_exact
+    delete next.command_glob
+    onChange(next)
+  }
+  const updateSelector = event => {
+    const next = { ...policy, [selectorType === 'glob' ? 'tool_glob' : 'tool_name']: event.target.value }
+    if (event.target.value !== 'terminal') {
+      delete next.command_exact
+      delete next.command_glob
+    }
+    onChange(next)
+  }
+  const updateList = key => event => onChange({ ...policy, [key]: parseListText(event.target.value) })
+  return jsxs('article', {
+    className: 'grid gap-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-3',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center justify-between gap-3',
+        children: [
+          jsx('h3', { className: 'text-sm font-semibold', children: `Policy ${index + 1}` }),
+          jsx('button', {
+            type: 'button',
+            className: 'rounded border border-(--ui-danger) px-2 py-1 text-xs text-(--ui-danger)',
+            onClick: onRemove,
+            children: 'Remove'
+          })
+        ]
+      }),
+      jsxs('div', {
+        className: 'grid gap-3 md:grid-cols-3',
+        children: [
+          jsxs('label', {
+            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
+            children: [
+              'Selector type',
+              jsxs('select', {
+                className: inputClass,
+                value: selectorType,
+                onChange: updateSelectorType,
+                children: [
+                  jsx('option', { value: 'exact', children: 'Exact tool' }),
+                  jsx('option', { value: 'glob', children: 'Tool glob' })
+                ]
+              })
+            ]
+          }),
+          jsxs('label', {
+            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
+            children: [
+              selectorType === 'glob' ? 'Tool glob' : 'Tool name',
+              jsx('input', {
+                className: inputClass,
+                value: selector || '',
+                onChange: updateSelector,
+                placeholder: selectorType === 'glob' ? 'records_*' : 'terminal'
+              })
+            ]
+          }),
+          jsxs('label', {
+            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
+            children: [
+              'Effect kind',
+              jsx('input', {
+                className: inputClass,
+                value: policy.effect_kind || '',
+                onChange: event => onChange({ ...policy, effect_kind: event.target.value }),
+                placeholder: 'consequential_write'
+              })
+            ]
+          })
+        ]
+      }),
+      jsxs('div', {
+        className: 'grid gap-3 md:grid-cols-2',
+        children: [
+          jsxs('label', {
+            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
+            children: [
+              'Display fields',
+              jsx('input', {
+                className: inputClass,
+                value: listText(policy.display_fields),
+                onChange: updateList('display_fields'),
+                placeholder: 'record_id, summary'
+              })
+            ]
+          }),
+          jsxs('label', {
+            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
+            children: [
+              'Replay fields',
+              jsx('input', {
+                className: inputClass,
+                value: listText(policy.replay_fields),
+                onChange: updateList('replay_fields'),
+                placeholder: 'record_id'
+              })
+            ]
+          })
+        ]
+      }),
+      terminalPolicy && jsxs('div', {
+        className: 'grid gap-3 md:grid-cols-2',
+        children: [
+          jsxs('label', {
+            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
+            children: [
+              'Exact commands, one per line',
+              jsx('textarea', {
+                className: `${inputClass} min-h-20 resize-y font-mono text-xs`,
+                value: Array.isArray(policy.command_exact) ? policy.command_exact.join('\n') : '',
+                onChange: updateList('command_exact')
+              })
+            ]
+          }),
+          jsxs('label', {
+            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
+            children: [
+              'Command globs, one per line',
+              jsx('textarea', {
+                className: `${inputClass} min-h-20 resize-y font-mono text-xs`,
+                value: Array.isArray(policy.command_glob) ? policy.command_glob.join('\n') : '',
+                onChange: updateList('command_glob')
+              })
+            ]
+          })
+        ]
+      })
+    ]
+  })
+}
+
+export function policyEditorKey(index, _policy) {
+  return `policy-${index}`
+}
+
+function PolicySettings({ ctx, ownerToken }) {
+  const [policies, setPolicies] = useState([])
+  const [digest, setDigest] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+
+  const load = useCallback(async () => {
+    if (!ownerToken) return
+    setLoading(true)
+    setError('')
+    try {
+      const result = await profileRest(ctx, '/settings/read', {
+        method: 'POST',
+        body: { token: ownerToken }
+      })
+      setPolicies(Array.isArray(result.policies) ? result.policies : [])
+      setDigest(result.digest || '')
+      setNotice('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setLoading(false)
+    }
+  }, [ctx, ownerToken])
+
+  useEffect(() => { void load() }, [load])
+
+  const save = useCallback(async () => {
+    setSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await profileRest(ctx, '/settings/policies', {
+        method: 'PUT',
+        body: { token: ownerToken, expected_digest: digest, policies }
+      })
+      setPolicies(Array.isArray(result.policies) ? result.policies : [])
+      setDigest(result.digest || '')
+      setNotice('Policies saved. Restart the Hermes agent process before relying on the new rules.')
+      host.notify({ kind: 'success', message: 'Human Gate policies saved.' })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSaving(false)
+    }
+  }, [ctx, digest, ownerToken, policies])
+
+  const update = (index, policy) => setPolicies(current => current.map((item, itemIndex) => itemIndex === index ? policy : item))
+  const remove = index => setPolicies(current => current.filter((_, itemIndex) => itemIndex !== index))
+  const add = () => setPolicies(current => [...current, {
+    tool_name: '',
+    effect_kind: 'consequential_write',
+    display_fields: [],
+    replay_fields: []
+  }])
+
+  return jsxs('section', {
+    className: 'grid gap-3',
+    children: [
+      jsxs('div', {
+        className: 'rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) p-3 text-xs text-(--ui-text-secondary)',
+        children: [
+          jsx('h2', { className: 'mb-1 text-sm font-semibold text-(--ui-text-primary)', children: 'Policy settings' }),
+          jsx('p', { children: 'This editor manages explicit tool and terminal approval policies only. Built-in owned effects remain gated. Provider accounts and credentials are never shown or changed here.' }),
+          jsx('p', { className: 'mt-1 text-(--ui-warning)', children: 'Saved policy changes require an agent process restart before they take effect.' })
+        ]
+      }),
+      jsxs('div', {
+        className: 'flex flex-wrap gap-2',
+        children: [
+          jsx('button', {
+            type: 'button',
+            className: 'rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm',
+            onClick: add,
+            children: 'Add policy'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-sm',
+            disabled: loading,
+            onClick: () => void load(),
+            children: loading ? 'Reloading…' : 'Reload policies'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'rounded bg-(--ui-accent) px-3 py-1.5 text-sm font-medium text-(--ui-accent-foreground) disabled:opacity-50',
+            disabled: saving || loading || !ownerToken || !digest,
+            onClick: () => void save(),
+            children: saving ? 'Saving…' : 'Save policies'
+          })
+        ]
+      }),
+      loading && jsx('p', { className: 'text-sm text-(--ui-text-tertiary)', children: 'Loading policies…' }),
+      !loading && policies.map((policy, index) => jsx(PolicyEditor, {
+        policy,
+        index,
+        onChange: next => update(index, next),
+        onRemove: () => remove(index)
+      }, policyEditorKey(index, policy))),
+      !loading && !policies.length && jsx('div', {
+        className: 'rounded-lg border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-tertiary)',
+        children: 'No explicit policies. Built-in Human Gate effects are still protected.'
+      }),
+      notice && jsx('div', { className: 'rounded bg-(--ui-success-bg) p-3 text-sm text-(--ui-success)', children: notice }),
+      error && jsx('div', { role: 'alert', className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)', children: error })
+    ]
+  })
+}
+
 function HumanGatePage({ ctx }) {
   const [ownerToken, setOwnerToken] = useState('')
   const [ownerError, setOwnerError] = useState('')
+  const [view, setView] = useState('approvals')
+  const [query, setQuery] = useState('')
+  const [stateFilter, setStateFilter] = useState('all')
+  const [effectFilter, setEffectFilter] = useState('all')
+  const [sort, setSort] = useState('newest')
+  const [expandedId, setExpandedId] = useState('')
   const { requests, loading, error, refresh } = useRequests(ctx)
   const pendingCount = useMemo(
     () => requests.filter(request => request.state === 'pending').length,
     [requests]
+  )
+  const effects = useMemo(
+    () => Array.from(new Set(requests.map(request => request.effect_kind).filter(Boolean))).sort(),
+    [requests]
+  )
+  const shown = useMemo(
+    () => filterAndSortRequests(requests, {
+      query,
+      state: stateFilter,
+      effect: effectFilter,
+      sort
+    }),
+    [effectFilter, query, requests, sort, stateFilter]
   )
 
   useEffect(() => {
@@ -718,47 +1109,134 @@ function HumanGatePage({ ctx }) {
               })
             ]
           }),
-          jsx('button', {
-            type: 'button',
-            className: 'rounded border border-(--ui-stroke-secondary) px-2.5 py-1 text-xs',
-            onClick: () => void refresh(),
-            children: 'Refresh'
+          jsxs('div', {
+            className: 'flex flex-wrap gap-2',
+            children: [
+              jsx('button', {
+                type: 'button',
+                className: view === 'approvals'
+                  ? 'rounded bg-(--ui-accent) px-3 py-1.5 text-xs font-medium text-(--ui-accent-foreground)'
+                  : 'rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-xs',
+                onClick: () => setView('approvals'),
+                children: 'Approvals'
+              }),
+              jsx('button', {
+                type: 'button',
+                className: view === 'settings'
+                  ? 'rounded bg-(--ui-accent) px-3 py-1.5 text-xs font-medium text-(--ui-accent-foreground)'
+                  : 'rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-xs',
+                onClick: () => setView('settings'),
+                children: 'Edit configuration'
+              }),
+              view === 'approvals' && jsx('button', {
+                type: 'button',
+                className: 'rounded border border-(--ui-stroke-secondary) px-2.5 py-1 text-xs',
+                onClick: () => void refresh(),
+                children: 'Refresh'
+              })
+            ]
           })
         ]
-      }),
-      jsx('div', {
-        className: 'text-xs text-(--ui-text-tertiary)',
-        children: `${pendingCount} pending · ${requests.length} shown`
       }),
       ownerError && jsx('div', {
         role: 'alert',
         className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)',
         children: `Owner control could not initialize. ${ownerError}`
       }),
-      error && jsx('div', {
+      view === 'approvals' && error && jsx('div', {
         role: 'alert',
         className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)',
         children: error
       }),
-      loading && jsx('div', {
-        className: 'text-sm text-(--ui-text-tertiary)',
-        children: 'Loading approval cards…'
-      }),
-      !loading && !requests.length && jsx('div', {
-        className: 'rounded-lg border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-tertiary)',
-        children: 'No approval requests yet.'
-      }),
-      jsx('section', {
+      view === 'approvals' && jsxs('section', {
         className: 'grid gap-3',
-        children: requests.map(request =>
-          jsx(ApprovalCard, {
-            ctx,
-            request,
-            ownerToken,
-            onChanged: refresh
-          }, request.id)
-        )
-      })
+        children: [
+          jsxs('div', {
+            className: 'grid gap-2 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-3 md:grid-cols-[minmax(14rem,1fr)_repeat(3,minmax(9rem,auto))]',
+            children: [
+              jsx('input', {
+                type: 'search',
+                'aria-label': 'Search approvals',
+                placeholder: 'Search approvals',
+                className: 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1.5 text-sm outline-none focus:border-(--ui-accent)',
+                value: query,
+                onChange: event => setQuery(event.target.value)
+              }),
+              jsxs('select', {
+                'aria-label': 'Filter by state',
+                className: 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1.5 text-sm',
+                value: stateFilter,
+                onChange: event => setStateFilter(event.target.value),
+                children: [
+                  jsx('option', { value: 'all', children: 'All states' }),
+                  ...['pending', 'approved', 'changes_requested', 'denied', 'cancelled', 'claimed', 'executed', 'failed', 'uncertain'].map(state =>
+                    jsx('option', { value: state, children: state.replaceAll('_', ' ') }, state)
+                  )
+                ]
+              }),
+              jsxs('select', {
+                'aria-label': 'Filter by effect',
+                className: 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1.5 text-sm',
+                value: effectFilter,
+                onChange: event => setEffectFilter(event.target.value),
+                children: [
+                  jsx('option', { value: 'all', children: 'All effects' }),
+                  ...effects.map(effect => jsx('option', { value: effect, children: effect }, effect))
+                ]
+              }),
+              jsxs('select', {
+                'aria-label': 'Sort approvals',
+                className: 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1.5 text-sm',
+                value: sort,
+                onChange: event => setSort(event.target.value),
+                children: [
+                  jsx('option', { value: 'newest', children: 'Newest first' }),
+                  jsx('option', { value: 'oldest', children: 'Oldest first' }),
+                  jsx('option', { value: 'tool', children: 'Tool name' }),
+                  jsx('option', { value: 'state', children: 'State' })
+                ]
+              })
+            ]
+          }),
+          jsx('div', {
+            className: 'text-xs text-(--ui-text-tertiary)',
+            children: `${pendingCount} pending · ${shown.length} of ${requests.length} shown`
+          }),
+          loading && jsx('div', {
+            className: 'text-sm text-(--ui-text-tertiary)',
+            children: 'Loading approvals…'
+          }),
+          !loading && !shown.length && jsx('div', {
+            className: 'rounded-lg border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-tertiary)',
+            children: requests.length ? 'No approvals match these filters.' : 'No approval requests yet.'
+          }),
+          !loading && Boolean(shown.length) && jsx('div', {
+            className: 'overflow-x-auto rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-surface-primary)',
+            children: jsxs('table', {
+              className: 'w-full min-w-[54rem] border-collapse text-left',
+              children: [
+                jsx('thead', {
+                  className: 'bg-(--ui-surface-secondary) text-[0.6875rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+                  children: jsxs('tr', {
+                    children: ['State', 'Request', 'Scope', 'Preview', 'Created', ''].map(label =>
+                      jsx('th', { className: 'px-3 py-2 font-medium', children: label }, label || 'actions')
+                    )
+                  })
+                }),
+                ...shown.map(request => jsx(ApprovalTableEntry, {
+                  ctx,
+                  request,
+                  ownerToken,
+                  onChanged: refresh,
+                  expanded: expandedId === request.id,
+                  onToggle: () => setExpandedId(current => current === request.id ? '' : request.id)
+                }, request.id))
+              ]
+            })
+          })
+        ]
+      }),
+      view === 'settings' && jsx(PolicySettings, { ctx, ownerToken })
     ]
   })
 }

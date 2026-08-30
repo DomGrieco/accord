@@ -68,5 +68,14 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "Audit history" in source
     assert "request.audit" in source
     assert "Human Gate will not retry it automatically" in source
+    assert "Search approvals" in source
+    assert "All states" in source
+    assert "All effects" in source
+    assert "Newest first" in source
+    assert "Policy settings" in source
+    assert "Add policy" in source
+    assert "Save policies" in source
+    assert "/settings/read" in source
+    assert "/settings/policies" in source
     assert "setTimeout" in source
     assert "expires" not in source

@@ -62,6 +62,62 @@ assert.deepEqual(
 )
 assert.deepEqual(JSON.parse(JSON.stringify(activeInboxRequests(null))), [])
 
+const policyEditorKey = plugin.namespace.policyEditorKey
+assert.equal(typeof policyEditorKey, 'function')
+assert.equal(policyEditorKey(3, { tool_name: '' }), policyEditorKey(3, { tool_name: 'terminal' }))
+assert.equal(policyEditorKey(3, { tool_glob: 'records_*' }), policyEditorKey(3, { tool_glob: '*_write' }))
+assert.notEqual(policyEditorKey(3, {}), policyEditorKey(4, {}))
+
+const filterAndSortRequests = plugin.namespace.filterAndSortRequests
+assert.equal(typeof filterAndSortRequests, 'function')
+const approvalRows = [
+  {
+    id: 'new-terminal',
+    state: 'pending',
+    effect_kind: 'local_command',
+    profile: 'life',
+    tool_name: 'terminal',
+    display: { command: 'git status --short' },
+    created_at: '2026-08-30T12:00:00Z'
+  },
+  {
+    id: 'old-publish',
+    state: 'executed',
+    effect_kind: 'publish',
+    profile: 'life',
+    tool_name: 'x_create_post',
+    display: { account: 'FixtureAccount', text: 'Fixture post' },
+    created_at: '2026-08-29T12:00:00Z'
+  }
+]
+assert.deepEqual(
+  JSON.parse(JSON.stringify(filterAndSortRequests(approvalRows, {
+    query: 'git status',
+    state: 'all',
+    effect: 'all',
+    sort: 'newest'
+  }))),
+  [approvalRows[0]]
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(filterAndSortRequests(approvalRows, {
+    query: '',
+    state: 'executed',
+    effect: 'publish',
+    sort: 'oldest'
+  }))),
+  [approvalRows[1]]
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(filterAndSortRequests(approvalRows, {
+    query: '',
+    state: 'all',
+    effect: 'all',
+    sort: 'tool'
+  }))).map(row => row.tool_name),
+  ['terminal', 'x_create_post']
+)
+
 const retrySessionWakeLabel = plugin.namespace.retrySessionWakeLabel
 assert.equal(retrySessionWakeLabel(cancelledFailed), 'Retry session wake')
 assert.equal(retrySessionWakeLabel(cancelledDelivered), '')

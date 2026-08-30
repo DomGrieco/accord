@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import sys
+import threading
+import time
+from collections.abc import Mapping
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,7 +31,56 @@ if _package_file is None or not Path(_package_file).resolve().is_relative_to(_PL
 
 from human_gate.models import Decision, RequestRecord, RequestState  # noqa: E402
 from human_gate.paths import resolve_db_path  # noqa: E402
+from human_gate.policy import policies_from_config  # noqa: E402
 from human_gate.store import ConflictError, GateStore  # noqa: E402
+
+_POLICY_CONFIG_PATH = "plugins.entries.human-gate.settings.policies"
+_SETTINGS_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _cross_process_settings_lock():
+    """Serialize policy compare-and-write operations across dashboard processes."""
+    from hermes_constants import get_config_path
+
+    lock_path = get_config_path().with_name("config.yaml.human-gate.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    lock_file.seek(0, 2)
+                    if lock_file.tell() == 0:
+                        lock_file.write(b"0")
+                        lock_file.flush()
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError, PermissionError) as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "timed out waiting for the Human Gate settings lock"
+                    ) from exc
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                import msvcrt
+
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class OwnerTokenBody(BaseModel):
@@ -50,8 +106,87 @@ class DecisionBody(OwnerTokenBody):
     record_version: int = Field(ge=1)
 
 
+class PolicySettingsBody(OwnerTokenBody):
+    expected_digest: str = Field(min_length=64, max_length=64)
+    policies: list[dict[str, Any]] = Field(max_length=64)
+
+
 def default_db_path() -> Path:
     return resolve_db_path()
+
+
+def _normalize_policy_config(raw: Any) -> list[dict[str, Any]]:
+    policies_from_config(raw)
+    encoded = json.dumps(raw, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    decoded = json.loads(encoded)
+    if not isinstance(decoded, list) or not all(isinstance(item, dict) for item in decoded):
+        raise ValueError("policies must be a list of objects")
+    return decoded
+
+
+def _policy_digest(policies: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        policies,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _settings_response(policies: list[dict[str, Any]]) -> dict[str, object]:
+    return {
+        "policies": policies,
+        "digest": _policy_digest(policies),
+        "restart_required": True,
+    }
+
+
+def _read_policy_config() -> list[dict[str, Any]]:
+    from hermes_cli.config import load_config_readonly
+
+    config = load_config_readonly() or {}
+    plugins = config.get("plugins") if isinstance(config, Mapping) else None
+    entries = plugins.get("entries") if isinstance(plugins, Mapping) else None
+    entry = entries.get("human-gate") if isinstance(entries, Mapping) else None
+    if not isinstance(entry, Mapping):
+        return []
+    settings = entry.get("settings")
+    legacy = entry.get("config")
+    if isinstance(settings, Mapping) and "policies" in settings:
+        raw = settings.get("policies")
+    elif isinstance(legacy, Mapping):
+        raw = legacy.get("policies", [])
+    else:
+        raw = []
+    return _normalize_policy_config(raw)
+
+
+def _write_policy_config(
+    policies: list[dict[str, Any]],
+    expected_digest: str,
+) -> list[dict[str, Any]]:
+    normalized = _normalize_policy_config(policies)
+    with _SETTINGS_LOCK, _cross_process_settings_lock():
+        current = _read_policy_config()
+        if _policy_digest(current) != expected_digest:
+            raise ConflictError("policy settings changed; reload before saving")
+        from hermes_cli.config import set_config_value
+
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                set_config_value(
+                    _POLICY_CONFIG_PATH,
+                    json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+                    force=True,
+                )
+        except SystemExit as exc:
+            raise RuntimeError("Hermes rejected the policy settings update") from exc
+        saved = _read_policy_config()
+        if saved != normalized:
+            raise RuntimeError("policy settings could not be verified after saving")
+        return saved
 
 
 def _record(record: RequestRecord, audit: list[dict[str, Any]]) -> dict[str, object]:
@@ -143,6 +278,36 @@ def build_router(path: str | Path) -> APIRouter:
             return {"ok": True}
         finally:
             store.close()
+
+    @api.post("/settings/read")
+    async def read_settings(body: OwnerTokenBody) -> dict[str, object]:
+        store = GateStore(db_path)
+        try:
+            _authorize(store, body.token)
+        finally:
+            store.close()
+        try:
+            return _settings_response(_read_policy_config())
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.put("/settings/policies")
+    async def write_settings(body: PolicySettingsBody) -> dict[str, object]:
+        store = GateStore(db_path)
+        try:
+            _authorize(store, body.token)
+        finally:
+            store.close()
+        try:
+            normalized = _normalize_policy_config(body.policies)
+            saved = _write_policy_config(normalized, body.expected_digest)
+            return _settings_response(saved)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ImportError, PermissionError, RuntimeError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @api.get("/requests")
     async def list_requests(state: str = "pending", limit: int = 100) -> dict[str, object]:

@@ -40,6 +40,29 @@ def test_read_only_xurl_command_is_not_classified_as_a_write() -> None:
     assert terminal_xurl_write_is_unsupported(args) is False
 
 
+def test_xurl_filename_in_unrelated_shell_command_is_not_classified_as_a_write() -> None:
+    args = {
+        "command": ("git add human_gate/xurl_adapter.py && git commit -m 'Test adapter changes'")
+    }
+
+    assert parse_terminal_xurl_write(args) is None
+    assert terminal_xurl_write_matches(args) is False
+    assert terminal_xurl_write_is_unsupported(args) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "xurl.exe post 'blocked'",
+        "./xurl.exe post 'blocked'",
+        "C:/Tools/xurl.exe post 'blocked'",
+    ],
+)
+def test_windows_xurl_executable_alias_is_gated(command: str) -> None:
+    assert terminal_xurl_write_matches({"command": command}) is True
+    assert terminal_xurl_write_is_unsupported({"command": command}) is False
+
+
 @pytest.mark.parametrize(
     "command",
     [

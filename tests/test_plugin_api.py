@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import shutil
@@ -102,6 +103,99 @@ def _decision_body(request, decision: str, comment: str = "", token: str = OWNER
         "digest": request.call_digest,
         "record_version": request.record_version,
     }
+
+
+def test_policy_settings_are_owner_authenticated_validated_and_versioned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "gate.db"
+    configured = [
+        {
+            "tool_name": "terminal",
+            "effect_kind": "local_command",
+            "display_fields": ["command"],
+            "replay_fields": ["command"],
+            "command_glob": ["git status*"],
+        }
+    ]
+    writes: list[tuple[list[dict[str, Any]], str]] = []
+    monkeypatch.setattr(_API, "_read_policy_config", lambda: configured)
+
+    def write(policies: list[dict[str, Any]], expected_digest: str) -> list[dict[str, Any]]:
+        writes.append((policies, expected_digest))
+        return policies
+
+    monkeypatch.setattr(_API, "_write_policy_config", write)
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+
+    rejected = client.post("/settings/read", json={"token": "x" * 64})
+    loaded = client.post("/settings/read", json={"token": OWNER_TOKEN})
+
+    assert rejected.status_code == 403
+    assert loaded.status_code == 200
+    body = loaded.json()
+    assert body["policies"] == configured
+    assert len(body["digest"]) == 64
+    assert body["restart_required"] is True
+
+    revised = [
+        {
+            "tool_glob": "records_*",
+            "effect_kind": "records_write",
+            "display_fields": ["record_id"],
+            "replay_fields": ["record_id"],
+        }
+    ]
+    saved = client.put(
+        "/settings/policies",
+        json={
+            "token": OWNER_TOKEN,
+            "expected_digest": body["digest"],
+            "policies": revised,
+        },
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["policies"] == revised
+    assert writes == [(revised, body["digest"])]
+
+
+def test_policy_settings_reject_unsafe_projection_fields_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "gate.db"
+    monkeypatch.setattr(_API, "_read_policy_config", lambda: [])
+    writes: list[object] = []
+    monkeypatch.setattr(
+        _API,
+        "_write_policy_config",
+        lambda policies, expected_digest: writes.append((policies, expected_digest)),
+    )
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    loaded = client.post("/settings/read", json={"token": OWNER_TOKEN}).json()
+
+    response = client.put(
+        "/settings/policies",
+        json={
+            "token": OWNER_TOKEN,
+            "expected_digest": loaded["digest"],
+            "policies": [
+                {
+                    "tool_name": "dangerous_write",
+                    "effect_kind": "write",
+                    "display_fields": ["api_key"],
+                    "replay_fields": ["api_key"],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert writes == []
 
 
 def test_request_list_includes_safe_audit_history(tmp_path: Path) -> None:
@@ -578,3 +672,38 @@ def test_approval_requires_authoritative_digest_and_record_version(tmp_path: Pat
     stored = GateStore(path).get_request(request.id)
     assert stored is not None
     assert stored.state is RequestState.PENDING
+
+
+def test_policy_settings_compare_and_write_hold_cross_process_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_process_lock():
+        events.append("lock-enter")
+        try:
+            yield
+        finally:
+            events.append("lock-exit")
+
+    reads = iter([[], [{"tool_name": "terminal", "effect_kind": "local"}]])
+
+    def fake_read() -> list[dict[str, Any]]:
+        events.append("read")
+        return next(reads)
+
+    def fake_set_config_value(*_args: Any, **_kwargs: Any) -> None:
+        events.append("write")
+
+    monkeypatch.setattr(_API, "_cross_process_settings_lock", fake_process_lock)
+    monkeypatch.setattr(_API, "_read_policy_config", fake_read)
+    monkeypatch.setattr("hermes_cli.config.set_config_value", fake_set_config_value)
+
+    saved = _API._write_policy_config(
+        [{"tool_name": "terminal", "effect_kind": "local"}],
+        _API._policy_digest([]),
+    )
+
+    assert saved == [{"tool_name": "terminal", "effect_kind": "local"}]
+    assert events == ["lock-enter", "read", "write", "read", "lock-exit"]
