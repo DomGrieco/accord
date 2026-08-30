@@ -68,6 +68,85 @@ assert.equal(policyEditorKey(3, { tool_name: '' }), policyEditorKey(3, { tool_na
 assert.equal(policyEditorKey(3, { tool_glob: 'records_*' }), policyEditorKey(3, { tool_glob: '*_write' }))
 assert.notEqual(policyEditorKey(3, {}), policyEditorKey(4, {}))
 
+const toolOptions = [
+  { name: 'terminal', toolset: 'terminal', description: 'Run a command', fields: ['command', 'workdir'] },
+  { name: 'x_create_post', toolset: 'x', description: 'Publish a post', fields: ['account', 'text'] },
+  { name: 'x_search', toolset: 'x', description: 'Search posts', fields: ['account', 'limit', 'query'] },
+  { name: ']value', toolset: 'fixture', description: 'Fixture', fields: [] },
+  { name: '[value', toolset: 'fixture', description: 'Fixture', fields: [] },
+  { name: '[abc', toolset: 'fixture', description: 'Fixture', fields: [] },
+  { name: '^value', toolset: 'fixture', description: 'Fixture', fields: [] },
+  { name: 'alpha', toolset: 'fixture', description: 'Fixture', fields: [] }
+]
+const matchingToolOptions = plugin.namespace.matchingToolOptions
+assert.equal(typeof matchingToolOptions, 'function')
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, 'terminal', 'exact'))).map(tool => tool.name),
+  ['terminal']
+)
+assert.deepEqual(JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, ' terminal ', 'exact'))), [])
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, 'x_*', 'glob'))).map(tool => tool.name),
+  ['x_create_post', 'x_search']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, 'x_[cs]*', 'glob'))).map(tool => tool.name),
+  ['x_create_post', 'x_search']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, '[!x]*', 'glob'))).map(tool => tool.name),
+  ['[abc', '[value', ']value', '^value', 'alpha', 'terminal']
+)
+assert.deepEqual(JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, '[z-a]*', 'glob'))), [])
+assert.deepEqual(JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, '[', 'glob'))), [])
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, '[]a]*', 'glob'))).map(tool => tool.name),
+  [']value', 'alpha']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, '[[]*', 'glob'))).map(tool => tool.name),
+  ['[abc', '[value']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, '[^x]*', 'glob'))).map(tool => tool.name),
+  ['^value', 'x_create_post', 'x_search']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(toolOptions, '[abc', 'glob'))).map(tool => tool.name),
+  ['[abc']
+)
+const rangeEdgeTools = ['😀', 'a', 'é', '-', '!'].map(name => ({ name, fields: [] }))
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(rangeEdgeTools, '[!-éaa]', 'glob'))).map(tool => tool.name).sort(),
+  ['!', '😀']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(rangeEdgeTools, '[--!!]', 'glob'))).map(tool => tool.name).sort(),
+  ['!', '-', 'a', 'é', '😀']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(matchingToolOptions(rangeEdgeTools, '[!^]', 'glob'))).map(tool => tool.name).sort(),
+  ['!', '-', 'a', 'é', '😀']
+)
+
+const policyFieldOptions = plugin.namespace.policyFieldOptions
+assert.equal(typeof policyFieldOptions, 'function')
+assert.deepEqual(
+  JSON.parse(JSON.stringify(policyFieldOptions(toolOptions, 'terminal', 'exact'))),
+  ['command', 'workdir']
+)
+assert.deepEqual(
+  JSON.parse(JSON.stringify(policyFieldOptions(toolOptions, 'x_*', 'glob'))),
+  ['account']
+)
+
+const availableReplayFields = plugin.namespace.availableReplayFields
+assert.equal(typeof availableReplayFields, 'function')
+assert.deepEqual(
+  JSON.parse(JSON.stringify(availableReplayFields(['record_id', 'summary'], ['record_id']))),
+  ['summary']
+)
+
 const filterAndSortRequests = plugin.namespace.filterAndSortRequests
 assert.equal(typeof filterAndSortRequests, 'function')
 const approvalRows = [

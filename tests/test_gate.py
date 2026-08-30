@@ -9,8 +9,21 @@ import pytest
 from human_gate.errors import EffectDefinitiveFailureError, EffectUncertainError
 from human_gate.gate import GateDecision, HumanGate
 from human_gate.models import Decision, RequestState
-from human_gate.policy import PolicyRegistry, ToolPolicy, policies_from_config
+from human_gate.policy import (
+    PolicyRegistry,
+    ToolPolicy,
+    is_safe_projection_field,
+    policies_from_config,
+)
 from human_gate.store import GateStore
+
+
+def test_safe_projection_field_uses_policy_validation_rules() -> None:
+    assert is_safe_projection_field("record_id")
+    assert is_safe_projection_field("media.digest")
+    assert not is_safe_projection_field("api_key")
+    assert not is_safe_projection_field("sessionToken")
+    assert not is_safe_projection_field("invalid field")
 
 
 def build_gate(tmp_path: Path) -> HumanGate:

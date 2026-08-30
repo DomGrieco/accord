@@ -796,10 +796,227 @@ function parseListText(value) {
     .filter(Boolean)
 }
 
-function PolicyEditor({ policy, index, onChange, onRemove }) {
+function globCharacterClass(pattern, index, character) {
+  let end = index + 1
+  if (end < pattern.length && pattern[end] === '!') end += 1
+  if (end < pattern.length && pattern[end] === ']') end += 1
+  while (end < pattern.length && pattern[end] !== ']') end += 1
+  if (end >= pattern.length) return null
+
+  let memberStart = index + 1
+  let stuff
+  if (!pattern.slice(memberStart, end).includes('-')) {
+    stuff = pattern.slice(memberStart, end).join('').replaceAll('\\', '\\\\')
+  } else {
+    const chunks = []
+    let search = pattern[memberStart] === '!' ? memberStart + 2 : memberStart + 1
+    while (true) {
+      let hyphen = -1
+      for (let cursor = search; cursor < end; cursor += 1) {
+        if (pattern[cursor] === '-') {
+          hyphen = cursor
+          break
+        }
+      }
+      if (hyphen < 0) break
+      chunks.push(pattern.slice(memberStart, hyphen).join(''))
+      memberStart = hyphen + 1
+      search = hyphen + 3
+    }
+    const finalChunk = pattern.slice(memberStart, end).join('')
+    if (finalChunk) chunks.push(finalChunk)
+    else chunks[chunks.length - 1] += '-'
+
+    for (let cursor = chunks.length - 1; cursor > 0; cursor -= 1) {
+      const left = Array.from(chunks[cursor - 1])
+      const right = Array.from(chunks[cursor])
+      if (left.at(-1).codePointAt(0) > right[0].codePointAt(0)) {
+        chunks[cursor - 1] = left.slice(0, -1).join('') + right.slice(1).join('')
+        chunks.splice(cursor, 1)
+      }
+    }
+    stuff = chunks
+      .map(chunk => chunk.replaceAll('\\', '\\\\').replaceAll('-', '\\-'))
+      .join('-')
+  }
+
+  if (!stuff) return { matches: false, next: end + 1 }
+  if (stuff === '!') return { matches: true, next: end + 1 }
+  let negated = false
+  if (stuff[0] === '!') {
+    negated = true
+    stuff = stuff.slice(1)
+  }
+  if (stuff[0] === '^') {
+    stuff = `\\${stuff}`
+  }
+  stuff = stuff.replaceAll('[', '\\[').replaceAll(']', '\\]')
+  try {
+    const included = new RegExp(`^[${stuff}]$`, 'u').test(character)
+    return { matches: negated ? !included : included, next: end + 1 }
+  } catch {
+    return { matches: false, next: end + 1 }
+  }
+}
+
+function fnmatchCase(value, pattern) {
+  const input = Array.from(String(value))
+  const glob = Array.from(String(pattern))
+  const memo = new Map()
+  const match = (inputIndex, patternIndex) => {
+    const key = `${inputIndex}:${patternIndex}`
+    if (memo.has(key)) return memo.get(key)
+    let result = false
+    if (patternIndex === glob.length) {
+      result = inputIndex === input.length
+    } else if (glob[patternIndex] === '*') {
+      let nextPattern = patternIndex + 1
+      while (glob[nextPattern] === '*') nextPattern += 1
+      for (let cursor = inputIndex; cursor <= input.length && !result; cursor += 1) {
+        result = match(cursor, nextPattern)
+      }
+    } else if (inputIndex < input.length && glob[patternIndex] === '?') {
+      result = match(inputIndex + 1, patternIndex + 1)
+    } else if (inputIndex < input.length && glob[patternIndex] === '[') {
+      const characterClass = globCharacterClass(glob, patternIndex, input[inputIndex])
+      result = characterClass
+        ? characterClass.matches && match(inputIndex + 1, characterClass.next)
+        : input[inputIndex] === '[' && match(inputIndex + 1, patternIndex + 1)
+    } else if (inputIndex < input.length && glob[patternIndex] === input[inputIndex]) {
+      result = match(inputIndex + 1, patternIndex + 1)
+    }
+    memo.set(key, result)
+    return result
+  }
+  return match(0, 0)
+}
+
+export function matchingToolOptions(tools, selector, selectorType) {
+  const candidates = Array.isArray(tools) ? tools : []
+  const value = String(selector ?? '')
+  if (!value) return []
+  return candidates
+    .filter(tool => {
+      const name = String(tool?.name ?? '')
+      return selectorType === 'glob' ? fnmatchCase(name, value) : name === value
+    })
+    .sort((left, right) => String(left?.name ?? '').localeCompare(String(right?.name ?? '')))
+}
+
+export function policyFieldOptions(tools, selector, selectorType) {
+  const matched = matchingToolOptions(tools, selector, selectorType)
+  if (!matched.length) return []
+  const fields = new Set((Array.isArray(matched[0]?.fields) ? matched[0].fields : []).map(text).filter(Boolean))
+  if (selectorType !== 'glob') return Array.from(fields).sort()
+  for (const tool of matched.slice(1)) {
+    const toolFields = new Set((Array.isArray(tool?.fields) ? tool.fields : []).map(text).filter(Boolean))
+    for (const field of fields) {
+      if (!toolFields.has(field)) fields.delete(field)
+    }
+  }
+  return Array.from(fields).sort()
+}
+
+export function availableReplayFields(displayFields, replayFields) {
+  const selected = new Set(Array.isArray(replayFields) ? replayFields : [])
+  return (Array.isArray(displayFields) ? displayFields : [])
+    .filter(field => text(field) && !selected.has(field))
+}
+
+function FieldPicker({ id, label, selected, options, onChange, allowCustom = true, help }) {
+  const [query, setQuery] = useState('')
+  const values = Array.isArray(selected) ? selected : []
+  const available = (Array.isArray(options) ? options : []).filter(field => !values.includes(field))
+  const candidate = text(query)
+  const canAdd = Boolean(candidate) && !values.includes(candidate) && (allowCustom || available.includes(candidate))
+  const add = () => {
+    if (!canAdd) return
+    onChange([...values, candidate])
+    setQuery('')
+  }
+  return jsxs('div', {
+    className: 'grid gap-1.5',
+    children: [
+      jsx('label', {
+        htmlFor: `${id}-input`,
+        className: 'text-xs text-(--ui-text-secondary)',
+        children: label
+      }),
+      Boolean(values.length) && jsx('div', {
+        className: 'flex flex-wrap gap-1.5',
+        children: values.map(field => jsxs('span', {
+          className: 'inline-flex items-center gap-1 rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1 font-mono text-xs',
+          children: [
+            field,
+            jsx('button', {
+              type: 'button',
+              className: 'text-(--ui-text-tertiary) hover:text-(--ui-danger)',
+              'aria-label': `Remove ${field} from ${label.toLowerCase()}`,
+              onClick: () => onChange(values.filter(value => value !== field)),
+              children: '×'
+            })
+          ]
+        }, field))
+      }),
+      jsxs('div', {
+        className: 'flex gap-2',
+        children: [
+          jsx('input', {
+            id: `${id}-input`,
+            type: 'search',
+            list: `${id}-options`,
+            className: 'min-w-0 flex-1 rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1.5 text-sm outline-none focus:border-(--ui-accent)',
+            value: query,
+            onChange: event => setQuery(event.target.value),
+            onKeyDown: event => {
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              add()
+            },
+            placeholder: 'Search or type a field name'
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'rounded border border-(--ui-stroke-secondary) px-3 py-1.5 text-xs disabled:opacity-50',
+            disabled: !canAdd,
+            onClick: add,
+            children: 'Add field'
+          })
+        ]
+      }),
+      jsx('datalist', {
+        id: `${id}-options`,
+        children: available.map(field => jsx('option', { value: field }, field))
+      }),
+      help && jsx('p', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: help })
+    ]
+  })
+}
+
+function duplicateItems(value) {
+  const seen = new Set()
+  const duplicates = new Set()
+  for (const item of Array.isArray(value) ? value : []) {
+    if (seen.has(item)) duplicates.add(item)
+    seen.add(item)
+  }
+  return Array.from(duplicates)
+}
+
+function PolicyEditor({ policy, index, onChange, onRemove, options }) {
   const selectorType = Object.hasOwn(policy, 'tool_glob') ? 'glob' : 'exact'
   const selector = selectorType === 'glob' ? policy.tool_glob : policy.tool_name
   const terminalPolicy = selector === 'terminal'
+  const tools = Array.isArray(options?.tools) ? options.tools : []
+  const effectKinds = Array.isArray(options?.effect_kinds) ? options.effect_kinds : []
+  const matchedTools = matchingToolOptions(tools, selector, selectorType)
+  const schemaFields = policyFieldOptions(tools, selector, selectorType)
+  const displayFields = Array.isArray(policy.display_fields) ? policy.display_fields : []
+  const replayFields = Array.isArray(policy.replay_fields) ? policy.replay_fields : []
+  const replayOptions = availableReplayFields(displayFields, replayFields)
+  const exactTool = selectorType === 'exact' ? matchedTools[0] : null
+  const toolListId = `policy-${index}-tools`
+  const effectListId = `policy-${index}-effects`
   const inputClass = 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-2 py-1.5 text-sm outline-none focus:border-(--ui-accent)'
   const updateSelectorType = event => {
     const next = { ...policy }
@@ -819,6 +1036,13 @@ function PolicyEditor({ policy, index, onChange, onRemove }) {
     onChange(next)
   }
   const updateList = key => event => onChange({ ...policy, [key]: parseListText(event.target.value) })
+  const updateDisplayFields = fields => onChange({
+    ...policy,
+    display_fields: fields,
+    replay_fields: replayFields.filter(field => fields.includes(field))
+  })
+  const exactCommandDuplicates = duplicateItems(policy.command_exact)
+  const commandGlobDuplicates = duplicateItems(policy.command_glob)
   return jsxs('article', {
     className: 'grid gap-3 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-3',
     children: [
@@ -857,10 +1081,20 @@ function PolicyEditor({ policy, index, onChange, onRemove }) {
             children: [
               selectorType === 'glob' ? 'Tool glob' : 'Tool name',
               jsx('input', {
+                type: 'search',
+                list: selectorType === 'exact' ? toolListId : undefined,
+                'aria-label': selectorType === 'exact' ? 'Search registered tools' : 'Tool glob',
                 className: inputClass,
                 value: selector || '',
                 onChange: updateSelector,
                 placeholder: selectorType === 'glob' ? 'records_*' : 'terminal'
+              }),
+              selectorType === 'exact' && jsx('datalist', {
+                id: toolListId,
+                children: tools.map(tool => jsx('option', {
+                  value: tool.name,
+                  label: [tool.toolset, tool.description].filter(Boolean).join(' · ')
+                }, tool.name))
               })
             ]
           }),
@@ -869,41 +1103,102 @@ function PolicyEditor({ policy, index, onChange, onRemove }) {
             children: [
               'Effect kind',
               jsx('input', {
+                type: 'search',
+                list: effectListId,
                 className: inputClass,
                 value: policy.effect_kind || '',
                 onChange: event => onChange({ ...policy, effect_kind: event.target.value }),
                 placeholder: 'consequential_write'
+              }),
+              jsx('datalist', {
+                id: effectListId,
+                children: effectKinds.map(effect => jsx('option', { value: effect }, effect))
+              }),
+              jsx('span', {
+                className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+                children: 'Choose a common effect or enter a custom label.'
               })
             ]
+          })
+        ]
+      }),
+      selectorType === 'exact' && jsx('div', {
+        className: 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-3 py-2 text-xs text-(--ui-text-secondary)',
+        children: exactTool
+          ? jsxs('div', {
+              className: 'grid gap-0.5',
+              children: [
+                jsxs('div', {
+                  children: [
+                    jsx('span', { className: 'font-medium text-(--ui-text-primary)', children: exactTool.name }),
+                    exactTool.toolset && ` · ${exactTool.toolset}`
+                  ]
+                }),
+                exactTool.description && jsx('p', { children: exactTool.description }),
+                jsx('p', {
+                  className: 'text-(--ui-text-tertiary)',
+                  children: `${schemaFields.length} safe top-level field${schemaFields.length === 1 ? '' : 's'} available.`
+                })
+              ]
+            })
+          : (selector
+              ? 'Custom or unavailable tool. Field names can still be added manually.'
+              : 'Choose a registered tool or type a custom tool name.')
+      }),
+      selectorType === 'glob' && jsxs('div', {
+        className: 'grid gap-2 rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-secondary) px-3 py-2 text-xs text-(--ui-text-secondary)',
+        children: [
+          jsx('div', {
+            className: 'font-medium text-(--ui-text-primary)',
+            children: 'Matching registered tools'
+          }),
+          !selector && jsx('p', { children: 'Use * and ? to preview registered tool matches.' }),
+          selector && !matchedTools.length && jsx('p', {
+            children: 'No registered tools match. This policy can still target a tool loaded later.'
+          }),
+          Boolean(matchedTools.length) && jsxs('div', {
+            className: 'flex flex-wrap gap-1.5',
+            children: [
+              ...matchedTools.slice(0, 8).map(tool => jsx('span', {
+                className: 'rounded border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) px-2 py-1 font-mono text-[0.6875rem]',
+                title: tool.description || tool.name,
+                children: tool.name
+              }, tool.name)),
+              matchedTools.length > 8 && jsx('span', {
+                className: 'px-1 py-1 text-(--ui-text-tertiary)',
+                children: `+${matchedTools.length - 8} more`
+              })
+            ]
+          }),
+          Boolean(matchedTools.length) && jsx('p', {
+            className: 'text-(--ui-text-tertiary)',
+            children: `${schemaFields.length} safe fields shared by all ${matchedTools.length} matching tools.`
           })
         ]
       }),
       jsxs('div', {
         className: 'grid gap-3 md:grid-cols-2',
         children: [
-          jsxs('label', {
-            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
-            children: [
-              'Display fields',
-              jsx('input', {
-                className: inputClass,
-                value: listText(policy.display_fields),
-                onChange: updateList('display_fields'),
-                placeholder: 'record_id, summary'
-              })
-            ]
+          jsx(FieldPicker, {
+            id: `policy-${index}-display-fields`,
+            label: 'Display fields',
+            selected: displayFields,
+            options: schemaFields,
+            onChange: updateDisplayFields,
+            help: schemaFields.length
+              ? (selectorType === 'glob'
+                  ? 'Suggestions are safe top-level fields shared by every matching tool schema. Custom fields remain available.'
+                  : 'Suggestions come from safe top-level fields in the matching tool schema. Custom fields remain available.')
+              : 'No matching schema fields are available. Add a field name manually if the tool is unloaded or deferred.'
           }),
-          jsxs('label', {
-            className: 'grid gap-1 text-xs text-(--ui-text-secondary)',
-            children: [
-              'Replay fields',
-              jsx('input', {
-                className: inputClass,
-                value: listText(policy.replay_fields),
-                onChange: updateList('replay_fields'),
-                placeholder: 'record_id'
-              })
-            ]
+          jsx(FieldPicker, {
+            id: `policy-${index}-replay-fields`,
+            label: 'Replay fields',
+            selected: replayFields,
+            options: replayOptions,
+            allowCustom: false,
+            onChange: fields => onChange({ ...policy, replay_fields: fields }),
+            help: 'Only displayed fields can be replayed.'
           })
         ]
       }),
@@ -918,6 +1213,10 @@ function PolicyEditor({ policy, index, onChange, onRemove }) {
                 className: `${inputClass} min-h-20 resize-y font-mono text-xs`,
                 value: Array.isArray(policy.command_exact) ? policy.command_exact.join('\n') : '',
                 onChange: updateList('command_exact')
+              }),
+              Boolean(exactCommandDuplicates.length) && jsx('span', {
+                className: 'text-[0.6875rem] text-(--ui-danger)',
+                children: `Remove duplicate commands: ${exactCommandDuplicates.join(', ')}`
               })
             ]
           }),
@@ -929,6 +1228,10 @@ function PolicyEditor({ policy, index, onChange, onRemove }) {
                 className: `${inputClass} min-h-20 resize-y font-mono text-xs`,
                 value: Array.isArray(policy.command_glob) ? policy.command_glob.join('\n') : '',
                 onChange: updateList('command_glob')
+              }),
+              Boolean(commandGlobDuplicates.length) && jsx('span', {
+                className: 'text-[0.6875rem] text-(--ui-danger)',
+                children: `Remove duplicate command globs: ${commandGlobDuplicates.join(', ')}`
               })
             ]
           })
@@ -945,22 +1248,43 @@ export function policyEditorKey(index, _policy) {
 function PolicySettings({ ctx, ownerToken }) {
   const [policies, setPolicies] = useState([])
   const [digest, setDigest] = useState('')
+  const [options, setOptions] = useState({ effect_kinds: [], tools: [] })
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [optionsError, setOptionsError] = useState('')
   const [notice, setNotice] = useState('')
 
   const load = useCallback(async () => {
     if (!ownerToken) return
     setLoading(true)
     setError('')
+    setOptionsError('')
+    setOptions({ effect_kinds: [], tools: [] })
     try {
-      const result = await profileRest(ctx, '/settings/read', {
-        method: 'POST',
-        body: { token: ownerToken }
-      })
+      const [settingsResult, optionsResult] = await Promise.allSettled([
+        profileRest(ctx, '/settings/read', {
+          method: 'POST',
+          body: { token: ownerToken }
+        }),
+        profileRest(ctx, '/settings/options', {
+          method: 'POST',
+          body: { token: ownerToken }
+        })
+      ])
+      if (settingsResult.status === 'rejected') throw settingsResult.reason
+      const result = settingsResult.value
       setPolicies(Array.isArray(result.policies) ? result.policies : [])
       setDigest(result.digest || '')
+      if (optionsResult.status === 'fulfilled') {
+        setOptions({
+          effect_kinds: Array.isArray(optionsResult.value.effect_kinds) ? optionsResult.value.effect_kinds : [],
+          tools: Array.isArray(optionsResult.value.tools) ? optionsResult.value.tools : []
+        })
+      } else {
+        const reason = optionsResult.reason instanceof Error ? optionsResult.reason.message : String(optionsResult.reason)
+        setOptionsError(`Tool options unavailable. You can still enter values manually. ${reason}`)
+      }
       setNotice('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -1036,10 +1360,11 @@ function PolicySettings({ ctx, ownerToken }) {
           })
         ]
       }),
-      loading && jsx('p', { className: 'text-sm text-(--ui-text-tertiary)', children: 'Loading policies…' }),
+      loading && jsx('p', { className: 'text-sm text-(--ui-text-tertiary)', children: 'Loading policies and tool options…' }),
       !loading && policies.map((policy, index) => jsx(PolicyEditor, {
         policy,
         index,
+        options,
         onChange: next => update(index, next),
         onRemove: () => remove(index)
       }, policyEditorKey(index, policy))),
@@ -1048,6 +1373,11 @@ function PolicySettings({ ctx, ownerToken }) {
         children: 'No explicit policies. Built-in Human Gate effects are still protected.'
       }),
       notice && jsx('div', { className: 'rounded bg-(--ui-success-bg) p-3 text-sm text-(--ui-success)', children: notice }),
+      optionsError && jsx('div', {
+        role: 'status',
+        className: 'rounded bg-(--ui-warning-bg) p-3 text-sm text-(--ui-warning)',
+        children: optionsError
+      }),
       error && jsx('div', { role: 'alert', className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)', children: error })
     ]
   })

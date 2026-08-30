@@ -27,6 +27,14 @@ ArgumentSpecificity = Callable[[dict[str, Any]], int] | None
 ArgumentProjector = Callable[[dict[str, Any]], Mapping[str, Any]] | None
 
 
+def is_safe_projection_field(value: Any) -> bool:
+    """Return whether a field name is valid and not secret-bearing."""
+    if not isinstance(value, str) or not _NAME_RE.fullmatch(value):
+        return False
+    normalized = value.lower()
+    return not any(part in normalized for part in _SECRET_FIELD_PARTS)
+
+
 def _field_names(value: Any, *, label: str) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -36,8 +44,7 @@ def _field_names(value: Any, *, label: str) -> tuple[str, ...]:
     for item in value:
         if not isinstance(item, str) or not _NAME_RE.fullmatch(item):
             raise ValueError(f"{label} contains an invalid field name")
-        normalized = item.lower()
-        if any(part in normalized for part in _SECRET_FIELD_PARTS):
+        if not is_safe_projection_field(item):
             raise ValueError(f"{label} contains a secret-bearing field")
         if item in result:
             raise ValueError(f"{label} contains a duplicate field")
@@ -94,10 +101,9 @@ class ToolPolicy:
             raise ValueError("owned execution identity requires an owned effect")
         execution_keys: set[str] = set()
         for key, value in self.owned_execution_identity:
-            normalized_key = key.lower()
             if not _NAME_RE.fullmatch(key):
                 raise ValueError("owned execution identity contains an invalid field name")
-            if any(part in normalized_key for part in _SECRET_FIELD_PARTS):
+            if not is_safe_projection_field(key):
                 raise ValueError("owned execution identity contains a secret-bearing field")
             if key in execution_keys:
                 raise ValueError("owned execution identity contains a duplicate field")

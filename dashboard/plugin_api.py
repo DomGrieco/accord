@@ -31,11 +31,14 @@ if _package_file is None or not Path(_package_file).resolve().is_relative_to(_PL
 
 from human_gate.models import Decision, RequestRecord, RequestState  # noqa: E402
 from human_gate.paths import resolve_db_path  # noqa: E402
-from human_gate.policy import policies_from_config  # noqa: E402
+from human_gate.policy import is_safe_projection_field, policies_from_config  # noqa: E402
 from human_gate.store import ConflictError, GateStore  # noqa: E402
 
 _POLICY_CONFIG_PATH = "plugins.entries.human-gate.settings.policies"
 _SETTINGS_LOCK = threading.RLock()
+_MAX_OPTION_TOOLS = 512
+_MAX_OPTION_FIELDS = 64
+_EFFECT_KIND_PRESETS = ("consequential_write", "external_publish", "local_command")
 
 
 @contextlib.contextmanager
@@ -140,6 +143,111 @@ def _settings_response(policies: list[dict[str, Any]]) -> dict[str, object]:
         "digest": _policy_digest(policies),
         "restart_required": True,
     }
+
+
+def _bounded_option_text(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def _bounded_option_identifier(value: Any, limit: int = 128) -> str:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        return ""
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return ""
+    return value
+
+
+def _build_settings_options(
+    available_tools: list[dict[str, Any]],
+    policies: list[dict[str, Any]],
+) -> dict[str, object]:
+    effect_kinds: set[str] = set(_EFFECT_KIND_PRESETS)
+    for policy in policies:
+        effect_kind = _bounded_option_identifier(policy.get("effect_kind"))
+        if effect_kind:
+            effect_kinds.add(effect_kind)
+
+    tools: list[dict[str, object]] = []
+    seen_names: set[str] = set()
+    ordered_tools = sorted(
+        available_tools,
+        key=lambda tool: (
+            _bounded_option_identifier(tool.get("name")),
+            _bounded_option_identifier(tool.get("toolset")),
+        ),
+    )
+    for tool in ordered_tools:
+        name = _bounded_option_identifier(tool.get("name"))
+        if not name or name in seen_names:
+            continue
+        parameters = tool.get("parameters")
+        properties = parameters.get("properties") if isinstance(parameters, Mapping) else None
+        fields = (
+            sorted(field for field in properties if is_safe_projection_field(field))[
+                :_MAX_OPTION_FIELDS
+            ]
+            if isinstance(properties, Mapping)
+            else []
+        )
+        tools.append(
+            {
+                "name": name,
+                "toolset": _bounded_option_identifier(tool.get("toolset")),
+                "description": _bounded_option_text(tool.get("description"), 240),
+                "fields": fields,
+            }
+        )
+        seen_names.add(name)
+        if len(tools) >= _MAX_OPTION_TOOLS:
+            break
+
+    payload: dict[str, object] = {
+        "effect_kinds": sorted(effect_kinds),
+        "tools": tools,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {"digest": sha256(encoded).hexdigest(), **payload}
+
+
+def _available_tool_definitions() -> list[dict[str, Any]]:
+    from hermes_cli.plugins import discover_plugins
+    from tools.registry import discover_builtin_tools, registry
+
+    # The Desktop dashboard can run without importing model_tools, whose module
+    # startup normally populates the process-local registry. Discover explicitly
+    # so this endpoint reflects built-in and enabled plugin tools in that process.
+    discover_builtin_tools()
+    discover_plugins()
+
+    names = set(registry.get_all_tool_names())
+    definitions = registry.get_definitions(names, quiet=True)
+    available: list[dict[str, Any]] = []
+    for definition in definitions:
+        function = definition.get("function") if isinstance(definition, Mapping) else None
+        if not isinstance(function, Mapping):
+            continue
+        name = function.get("name")
+        entry = registry.get_entry(name) if isinstance(name, str) else None
+        available.append(
+            {
+                "name": name,
+                "toolset": entry.toolset if entry is not None else "",
+                "description": function.get("description"),
+                "parameters": function.get("parameters"),
+            }
+        )
+    return available
+
+
+def _settings_options() -> dict[str, object]:
+    return _build_settings_options(_available_tool_definitions(), _read_policy_config())
 
 
 def _read_policy_config() -> list[dict[str, Any]]:
@@ -290,6 +398,18 @@ def build_router(path: str | Path) -> APIRouter:
             return _settings_response(_read_policy_config())
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @api.post("/settings/options")
+    async def read_settings_options(body: OwnerTokenBody) -> dict[str, object]:
+        store = GateStore(db_path)
+        try:
+            _authorize(store, body.token)
+        finally:
+            store.close()
+        try:
+            return _settings_options()
+        except (ImportError, RuntimeError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @api.put("/settings/policies")
     async def write_settings(body: PolicySettingsBody) -> dict[str, object]:

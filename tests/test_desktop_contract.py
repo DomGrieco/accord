@@ -76,6 +76,13 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "Add policy" in source
     assert "Save policies" in source
     assert "/settings/read" in source
+    assert "/settings/options" in source
     assert "/settings/policies" in source
+    assert "Search registered tools" in source
+    assert "Matching registered tools" in source
+    assert "Search or type a field name" in source
+    assert "Only displayed fields can be replayed" in source
+    assert "Choose a common effect or enter a custom label" in source
+    assert "setOptions({ effect_kinds: [], tools: [] })" in source
     assert "setTimeout" in source
     assert "expires" not in source

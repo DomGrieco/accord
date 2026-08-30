@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
 import sys
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -160,6 +162,191 @@ def test_policy_settings_are_owner_authenticated_validated_and_versioned(
     assert saved.status_code == 200
     assert saved.json()["policies"] == revised
     assert writes == [(revised, body["digest"])]
+
+
+def test_policy_options_are_owner_authenticated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "gate.db"
+    monkeypatch.setattr(
+        _API,
+        "_available_tool_definitions",
+        lambda: [
+            {
+                "name": "terminal",
+                "toolset": "terminal",
+                "description": "Run a command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _API,
+        "_read_policy_config",
+        lambda: [{"tool_name": "terminal", "effect_kind": "local_command"}],
+    )
+    client = _app(path)
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+
+    rejected = client.post("/settings/options", json={"token": "x" * 64})
+    loaded = client.post("/settings/options", json={"token": OWNER_TOKEN})
+
+    assert rejected.status_code == 403
+    assert loaded.status_code == 200
+    body = loaded.json()
+    assert len(body["digest"]) == 64
+    assert body["tools"] == [
+        {
+            "name": "terminal",
+            "toolset": "terminal",
+            "description": "Run a command",
+            "fields": ["command"],
+        }
+    ]
+
+
+def test_policy_options_are_bounded_sorted_and_exclude_secret_schema_data() -> None:
+    available = [
+        {
+            "name": "aaa_terminal",
+            "toolset": "terminal",
+            "description": f"  Run commands\n{'safely ' * 60}",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workdir": {"type": "string", "default": "SECRET_VALUE"},
+                    "api_key": {"type": "string"},
+                    "sessionToken": {"type": "string"},
+                    "invalid field": {"type": "string"},
+                    "command": {"type": "string"},
+                },
+            },
+        },
+        *[
+            {
+                "name": f"tool_{index:03d}",
+                "toolset": "fixture",
+                "description": "Fixture tool",
+                "parameters": {"type": "object", "properties": {}},
+            }
+            for index in range(512)
+        ],
+    ]
+
+    body = _API._build_settings_options(
+        available,
+        [{"tool_name": "x_create_post", "effect_kind": "publish"}],
+    )
+
+    assert len(body["digest"]) == 64
+    assert body["effect_kinds"] == [
+        "consequential_write",
+        "external_publish",
+        "local_command",
+        "publish",
+    ]
+    assert len(body["tools"]) == 512
+    assert [tool["name"] for tool in body["tools"]] == sorted(
+        tool["name"] for tool in body["tools"]
+    )
+    terminal = body["tools"][0]
+    assert terminal["name"] == "aaa_terminal"
+    assert terminal["toolset"] == "terminal"
+    assert terminal["fields"] == ["command", "workdir"]
+    assert "\n" not in terminal["description"]
+    assert len(terminal["description"]) <= 240
+    encoded = json.dumps(body)
+    assert "SECRET_VALUE" not in encoded
+    assert "api_key" not in encoded
+    assert "sessionToken" not in encoded
+
+
+def test_policy_options_preserve_registered_identifiers_exactly() -> None:
+    body = _API._build_settings_options(
+        [
+            {
+                "name": " exact_tool ",
+                "toolset": " custom_set ",
+                "description": "  Description may be normalized.  ",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        [{"tool_name": " exact_tool ", "effect_kind": " custom_effect "}],
+    )
+
+    assert body["tools"][0]["name"] == " exact_tool "
+    assert body["tools"][0]["toolset"] == " custom_set "
+    assert " custom_effect " in body["effect_kinds"]
+    assert body["tools"][0]["description"] == "Description may be normalized."
+
+
+def test_available_tool_definitions_discovers_builtin_and_plugin_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeRegistry:
+        def get_all_tool_names(self) -> list[str]:
+            calls.append("names")
+            return ["terminal"]
+
+        def get_definitions(self, names: set[str], *, quiet: bool) -> list[dict[str, Any]]:
+            calls.append(f"definitions:{sorted(names)}:{quiet}")
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "description": "Run a command",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"command": {"type": "string"}},
+                        },
+                    },
+                }
+            ]
+
+        def get_entry(self, name: str) -> types.SimpleNamespace:
+            calls.append(f"entry:{name}")
+            return types.SimpleNamespace(toolset="terminal")
+
+    registry_module = types.ModuleType("tools.registry")
+    registry_module.__dict__.update(
+        registry=FakeRegistry(),
+        discover_builtin_tools=lambda: calls.append("builtins"),
+    )
+    tools_module = types.ModuleType("tools")
+    tools_module.__path__ = []  # type: ignore[attr-defined]
+    plugins_module = types.ModuleType("hermes_cli.plugins")
+    plugins_module.__dict__["discover_plugins"] = lambda: calls.append("plugins")
+    monkeypatch.setitem(sys.modules, "tools", tools_module)
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins_module)
+
+    definitions = _API._available_tool_definitions()
+
+    assert calls == [
+        "builtins",
+        "plugins",
+        "names",
+        "definitions:['terminal']:True",
+        "entry:terminal",
+    ]
+    assert definitions == [
+        {
+            "name": "terminal",
+            "toolset": "terminal",
+            "description": "Run a command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            },
+        }
+    ]
 
 
 def test_policy_settings_reject_unsafe_projection_fields_before_write(
