@@ -270,6 +270,12 @@ def _read_policy_config() -> list[dict[str, Any]]:
     return _normalize_policy_config(raw)
 
 
+def _set_policy_config_value(encoded_policies: str) -> None:
+    from hermes_cli.config import set_config_value
+
+    set_config_value(_POLICY_CONFIG_PATH, encoded_policies, force=True)
+
+
 def _write_policy_config(
     policies: list[dict[str, Any]],
     expected_digest: str,
@@ -279,15 +285,11 @@ def _write_policy_config(
         current = _read_policy_config()
         if _policy_digest(current) != expected_digest:
             raise ConflictError("policy settings changed; reload before saving")
-        from hermes_cli.config import set_config_value
-
         sink = io.StringIO()
         try:
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-                set_config_value(
-                    _POLICY_CONFIG_PATH,
-                    json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
-                    force=True,
+                _set_policy_config_value(
+                    json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
                 )
         except SystemExit as exc:
             raise RuntimeError("Hermes rejected the policy settings update") from exc

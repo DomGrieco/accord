@@ -405,13 +405,28 @@ export async function submitResume(ctx, resume, token) {
       omit_messages: true
     })
     resumeResponded = true
-    const runtimeSessionId = String(resumed?.session_id || '')
-    const storedSessionId = String(resumed?.session_key || '')
+    const runtimeSessionId = String(resumed?.session_id || '').trim()
+    const storedSessionId = String(resumed?.session_key || '').trim()
+    const resolvedStoredSessionId = String(resumed?.resumed || '').trim()
+    const requestedStoredSessionId = String(resumed?.requested_session_id || '').trim()
+    const expectedStoredSessionId = String(resume?.stored_session_id || '').trim()
     if (!runtimeSessionId) {
       throw new Error('The stored session resumed without an active runtime.')
     }
     if (!storedSessionId) {
       throw new Error('The resumed runtime did not prove the stored session lineage.')
+    }
+    if (!resolvedStoredSessionId) {
+      throw new Error('The resumed runtime did not identify its resolved stored session.')
+    }
+    if (resolvedStoredSessionId !== storedSessionId) {
+      throw new Error('The resumed runtime returned conflicting stored session identities.')
+    }
+    if (!requestedStoredSessionId) {
+      throw new Error('The resumed runtime did not identify the requested stored session.')
+    }
+    if (!expectedStoredSessionId || requestedStoredSessionId !== expectedStoredSessionId) {
+      throw new Error('Hermes resumed a different stored session than requested.')
     }
     await profileRest(ctx, `/requests/${resume.request_id}/resume-target`, {
       method: 'POST',

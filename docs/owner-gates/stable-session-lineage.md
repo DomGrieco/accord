@@ -1,6 +1,6 @@
 # Owner gate: stable session lineage from Hermes
 
-Status: the plugin side is ready. Live Hermes 0.20.6 does not yet pass a stable stored session key into `pre_tool_call` hooks or `tool_execution` middleware.
+Status: ready for local Desktop testing. The generic Hermes host slice exists locally on branch `feature/human-gate-session-key` at commits `4a27bb2781` and `94d576b4b9`. It has not been pushed or published.
 
 ## Why this blocks cold resume
 
@@ -8,12 +8,26 @@ Hermes currently passes the agent runtime `session_id` and a per turn `task_id`.
 
 Human Gate now accepts `session_key` from both hook paths. When present, it uses that stable key for the persisted resume target and canonical approval lineage. It rejects configured tools with `human_gate_unroutable` when neither a stable key nor the legacy `session_id` exists. It no longer writes a shared sentinel lineage.
 
-## Verified host gap
+## Local host integration
 
-In the installed Hermes Agent source at `/Users/eru/.hermes/hermes-agent/agent/tool_executor.py`, `_dispatch_pre_tool_call_hooks` and `run_tool_execution_middleware` receive `session_id`, but neither call receives `_gateway_session_key` or another stored session key. The Hermes event hook docs show that gateway session events already use `session_key`.
+The local Hermes core slice passes `_gateway_session_key` through tool request middleware, `pre_tool_call`, tool execution middleware, `post_tool_call`, result transforms, deferred calls, `execute_code` nested tools, and local and remote persistent kernels. Existing positional hook and middleware calls remain compatible.
 
-## Owner decision
+The Desktop wake path now requires `session.resume` to return all four fields below before it registers a continuation and submits the hidden decision prompt:
 
-Authorize a separate Hermes core slice that widens the generic plugin hook and middleware context with a stable `session_key`, sourced from the current stored conversation identity. That change should use Hermes upstream TDD and exact head review. Do not special case Human Gate in core.
+- a nonempty runtime `session_id`
+- a nonempty stored `session_key`
+- a nonempty `resumed` identity equal to `session_key`
+- a nonempty `requested_session_id` equal to the stored session requested by the approval card
 
-Until that generic host field exists, keep live publication policies disabled. The deterministic demo effect remains safe for local panel work.
+Missing or conflicting identity proof fails before `prompt.submit` and leaves the decision retryable. Hermes may resolve the requested stored session to a continuation tip, but it must return both the original request and the resolved tip. This lets the exact approved replay survive runtime replacement without crossing sessions.
+
+## Safe Desktop owner test
+
+1. Use the existing Life Desktop server after it has restarted on the patched local Hermes checkout. Do not start a second server.
+2. Open Human Gate from the Desktop sidebar.
+3. From a Life Desktop chat, call `human_gate_demo_effect` with `Desktop approval panel fixture. No external effect.`
+4. Open the new card and choose Approve. Desktop must resume the exact stored session and submit a hidden decision prompt.
+5. Let the resumed session retry the same demo call once. The card must move through approved and claimed to succeeded, and the deterministic demo result must appear once.
+6. Repeat with a fresh card for Request changes, Deny, and Cancel. Each must resume with a nonempty hidden prompt. None may execute the demo effect.
+
+Keep generic policies empty and the X adapter disabled during this test. Do not use a live provider mutation.

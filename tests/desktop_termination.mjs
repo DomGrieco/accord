@@ -421,13 +421,87 @@ assert.equal(restCalls.length, 1)
 assert.equal(restCalls[0].path, '/requests/request-1/resume-failed')
 
 restCalls.length = 0
+host.requestProfile = async (_selected, method) => {
+  if (method === 'session.resume') {
+    return { session_id: 'runtime-resumed', session_key: 'continuation-tip' }
+  }
+  throw new Error(`prompt.submit must not run without a resolved resume target: ${method}`)
+}
+await assert.rejects(
+  submitResume(ctx, resume, 'owner-token'),
+  /did not identify its resolved stored session/
+)
+assert.equal(restCalls.length, 1)
+assert.equal(restCalls[0].path, '/requests/request-1/resume-failed')
+
+restCalls.length = 0
+host.requestProfile = async (_selected, method) => {
+  if (method === 'session.resume') {
+    return {
+      session_id: 'runtime-resumed',
+      session_key: 'continuation-tip',
+      resumed: 'different-tip'
+    }
+  }
+  throw new Error(`prompt.submit must not run after mismatched lineage proof: ${method}`)
+}
+await assert.rejects(
+  submitResume(ctx, resume, 'owner-token'),
+  /returned conflicting stored session identities/
+)
+assert.equal(restCalls.length, 1)
+assert.equal(restCalls[0].path, '/requests/request-1/resume-failed')
+
+restCalls.length = 0
+host.requestProfile = async (_selected, method) => {
+  if (method === 'session.resume') {
+    return {
+      session_id: 'runtime-resumed',
+      session_key: 'continuation-tip',
+      resumed: 'continuation-tip'
+    }
+  }
+  throw new Error(`prompt.submit must not run without a requested session echo: ${method}`)
+}
+await assert.rejects(
+  submitResume(ctx, resume, 'owner-token'),
+  /did not identify the requested stored session/
+)
+assert.equal(restCalls.length, 1)
+assert.equal(restCalls[0].path, '/requests/request-1/resume-failed')
+
+restCalls.length = 0
+host.requestProfile = async (_selected, method) => {
+  if (method === 'session.resume') {
+    return {
+      session_id: 'runtime-resumed',
+      session_key: 'continuation-tip',
+      resumed: 'continuation-tip',
+      requested_session_id: 'different-request'
+    }
+  }
+  throw new Error(`prompt.submit must not run after requested session mismatch: ${method}`)
+}
+await assert.rejects(
+  submitResume(ctx, resume, 'owner-token'),
+  /resumed a different stored session than requested/
+)
+assert.equal(restCalls.length, 1)
+assert.equal(restCalls[0].path, '/requests/request-1/resume-failed')
+
+restCalls.length = 0
 const promptCalls = []
 host.profileRoutes = async () => [route]
 host.retainProfile = async () => () => { released += 1 }
 host.requestProfile = async (selected, method, params) => {
   promptCalls.push({ selected, method, params })
   if (method === 'session.resume') {
-    return { session_id: 'runtime-resumed', session_key: 'continuation-tip' }
+    return {
+      session_id: 'runtime-resumed',
+      session_key: 'continuation-tip',
+      resumed: 'continuation-tip',
+      requested_session_id: 'stored'
+    }
   }
   if (method === 'prompt.submit') {
     throw new Error('Error invoking remote method: active session limit (3/3)')
@@ -454,7 +528,12 @@ assert.equal(restCalls[1].options.body.record_version, 7)
 restCalls.length = 0
 host.requestProfile = async (_selected, method) => {
   if (method === 'session.resume') {
-    return { session_id: 'runtime-resumed', session_key: 'continuation-tip' }
+    return {
+      session_id: 'runtime-resumed',
+      session_key: 'continuation-tip',
+      resumed: 'continuation-tip',
+      requested_session_id: 'stored'
+    }
   }
   if (method === 'prompt.submit') throw new Error('transport response lost after wake')
   throw new Error(`unexpected method ${method}`)
@@ -498,7 +577,12 @@ for (const decision of ['approve', 'comment', 'deny', 'cancel']) {
   host.requestProfile = async (_selected, method, params) => {
     matrixRpc.push({ method, params })
     if (method === 'session.resume') {
-      return { session_id: `runtime-${decision}`, session_key: `stored-${decision}` }
+      return {
+        session_id: `runtime-${decision}`,
+        session_key: `stored-${decision}`,
+        resumed: `stored-${decision}`,
+        requested_session_id: `stored-${decision}`
+      }
     }
     if (method === 'prompt.submit') return { accepted: true }
     throw new Error(`unexpected matrix method ${method}`)

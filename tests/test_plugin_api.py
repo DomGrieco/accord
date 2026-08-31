@@ -880,12 +880,12 @@ def test_policy_settings_compare_and_write_hold_cross_process_lock(
         events.append("read")
         return next(reads)
 
-    def fake_set_config_value(*_args: Any, **_kwargs: Any) -> None:
+    def fake_set_config_value(_encoded_policies: str) -> None:
         events.append("write")
 
     monkeypatch.setattr(_API, "_cross_process_settings_lock", fake_process_lock)
     monkeypatch.setattr(_API, "_read_policy_config", fake_read)
-    monkeypatch.setattr("hermes_cli.config.set_config_value", fake_set_config_value)
+    monkeypatch.setattr(_API, "_set_policy_config_value", fake_set_config_value)
 
     saved = _API._write_policy_config(
         [{"tool_name": "terminal", "effect_kind": "local"}],
