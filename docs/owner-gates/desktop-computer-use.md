@@ -1,9 +1,12 @@
 # Owner gate: Desktop computer-use capture
 
-Status: blocked on the macOS capture path only. Backend, policy, persistence, and static Desktop contract tests continue to run.
+Status: resolved on 2026-08-30 after a full Hermes Desktop quit and reopen. Automated capture can read and operate the packaged app again.
 
 ## Observed
 
+- After reopening Desktop on the patched checkout, computer-use captured the full Hermes window and accessibility tree. Human Gate stayed in the sidebar, loaded the Life profile approval inbox, and showed `0 pending · 40 of 40 shown`.
+- Switching to a Life session and back to Human Gate kept the sidebar entry and reloaded the same approval inbox.
+- The first capture before the Desktop restart returned a 1440 by 18 black strip with no accessibility elements. Restarting the existing Life messaging gateway alone did not fix the packaged Desktop capture or reload its profile serve process.
 - Retried at 2026-08-29 11:53 ADT after making unclassified post-claim failures uncertain. Window discovery found two Hermes windows and the macOS Screen Recording prompt. Exact capture of the main Hermes window still returned a zero by zero image with no accessibility elements.
 - Retried at 2026-08-29 11:00 ADT after adding one-use in-process effect claims. App discovery found the running Hermes process, but it exposed no windows. Exact Hermes capture still returned a zero by zero image with no accessibility elements. Cua Driver appeared installed but not running.
 - Retried at 2026-08-29 10:23 ADT after adding the owned mock publication path. Window discovery found Cua Driver, two Hermes windows, and the macOS Screen Recording prompt. Exact capture of the main Hermes window still returned a zero by zero image with no accessibility elements. The running packaged app exposed no Desktop development CDP endpoint on port 9222, so DOM inspection could not replace computer-use.
@@ -16,14 +19,6 @@ Status: blocked on the macOS capture path only. Backend, policy, persistence, an
 - `screencapture` could not create an image from the display.
 - `hermes computer-use doctor` reported Cua Driver 0.22.1, an active MCP session, Accessibility access, and Screen Recording access. It did not probe direct ScreenCaptureKit readiness.
 
-## Owner action
+## Remaining owner test
 
-Run this in Dominic's foreground terminal:
-
-```bash
-cua-driver permissions grant
-```
-
-Approve or re-approve Screen Recording for CuaDriver if macOS asks. Restart CuaDriver if the command asks for it. Do not restart or relaunch Hermes solely for this gate.
-
-After capture works, open Hermes Desktop, select Human Gate in the sidebar, and test the pending fixture card with computer-use. The fixture text is `Desktop approval panel fixture. No external effect.` It cannot publish or call a live provider.
+Open Hermes Desktop, select Human Gate, and open Edit configuration. Confirm the safe Life configuration still shows no generic policies and X publication disabled. A fresh safe fixture can then exercise the approval decision flow without a live provider call.
