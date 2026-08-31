@@ -454,6 +454,25 @@ export async function submitResume(ctx, resume, token) {
   }
 }
 
+export async function submitDecisionAndResume({ ctx, request, decision, comment = '', ownerToken }) {
+  const result = await profileRest(ctx, `/requests/${request.id}/decision`, {
+    method: 'POST',
+    body: {
+      token: ownerToken,
+      decision,
+      comment,
+      digest: request.call_digest,
+      record_version: request.record_version
+    }
+  })
+  const instruction = await profileRest(ctx, `/requests/${request.id}/resume-instruction`, {
+    method: 'POST',
+    body: { token: ownerToken }
+  })
+  await submitResume(ctx, instruction.resume, ownerToken)
+  return result
+}
+
 export function selectRuntimeToClose(active, storedSessionId) {
   if (!active || !Array.isArray(active.sessions)) {
     throw new Error('Hermes returned no valid sessions array.')
@@ -551,23 +570,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
     setBusy(decision)
     setError('')
     try {
-      const result = await profileRest(ctx, `/requests/${request.id}/decision`, {
-        method: 'POST',
-        body: {
-          token: ownerToken,
-          decision,
-          comment,
-          digest: request.call_digest,
-          record_version: request.record_version
-        }
-      })
-      if (['approve', 'comment', 'deny', 'cancel'].includes(decision)) {
-        const instruction = await profileRest(ctx, `/requests/${request.id}/resume-instruction`, {
-          method: 'POST',
-          body: { token: ownerToken }
-        })
-        await submitResume(ctx, instruction.resume, ownerToken)
-      }
+      await submitDecisionAndResume({ ctx, request, decision, comment, ownerToken })
       haptic(decision === 'approve' ? 'success' : 'tap')
       host.notify({
         kind: decision === 'approve' ? 'success' : 'info',

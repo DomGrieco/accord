@@ -465,3 +465,65 @@ await assert.rejects(
 )
 assert.equal(restCalls.length, 1)
 assert.equal(restCalls[0].path, '/requests/request-1/resume-target')
+
+const submitDecisionAndResume = plugin.namespace.submitDecisionAndResume
+assert.equal(typeof submitDecisionAndResume, 'function')
+
+for (const decision of ['approve', 'comment', 'deny', 'cancel']) {
+  const id = `matrix-${decision}`
+  const comment = decision === 'comment' ? 'Use the smaller scope.' : ''
+  const matrixRest = []
+  const matrixRpc = []
+  ctx.rest = async (path, options = {}) => {
+    matrixRest.push({ path, options })
+    if (path === `/requests/${id}/resume-instruction`) {
+      return { resume: {
+        profile: 'life',
+        stored_session_id: `stored-${decision}`,
+        request_id: id,
+        record_version: 2,
+        prompt: `Human decision: ${decision}. ${comment}`
+      } }
+    }
+    return { request: { id, state: decision } }
+  }
+  host.state.focusedSessionOwner = {
+    get: () => ({ authoritative: true, connectionId: 'local', profile: 'life' })
+  }
+  host.state.focusedSessionProfile = { get: () => 'life' }
+  host.state.profile = { get: () => 'life' }
+  host.state.connectionId = { get: () => 'local' }
+  host.profileRoutes = async () => [route]
+  host.retainProfile = async () => () => { released += 1 }
+  host.requestProfile = async (_selected, method, params) => {
+    matrixRpc.push({ method, params })
+    if (method === 'session.resume') {
+      return { session_id: `runtime-${decision}`, session_key: `stored-${decision}` }
+    }
+    if (method === 'prompt.submit') return { accepted: true }
+    throw new Error(`unexpected matrix method ${method}`)
+  }
+
+  await submitDecisionAndResume({
+    ctx,
+    request: { id, call_digest: 'a'.repeat(64), record_version: 1 },
+    decision,
+    comment,
+    ownerToken: 'owner-token'
+  })
+
+  assert.deepEqual(matrixRest.map(call => call.path), [
+    `/requests/${id}/decision`,
+    `/requests/${id}/resume-instruction`,
+    `/requests/${id}/resume-target`,
+    `/requests/${id}/resume-ack`
+  ])
+  assert.deepEqual(JSON.parse(JSON.stringify(matrixRest[0].options.body)), {
+    token: 'owner-token', decision, comment, digest: 'a'.repeat(64), record_version: 1
+  })
+  assert.deepEqual(matrixRpc.map(call => call.method), ['session.resume', 'prompt.submit'])
+  assert.equal(matrixRpc[1].params.display_kind, 'hidden')
+  if (decision === 'comment') assert.match(matrixRpc[1].params.text, /smaller scope/)
+}
+
+console.log('Desktop decision matrix passed: approve, request changes, deny, cancel, resume failures')
