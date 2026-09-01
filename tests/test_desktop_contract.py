@@ -88,5 +88,6 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "Queue demo in focused chat" in source
     assert "Focus a Life chat first" in source
     assert "Session ${request.stored_session_id" in source
+    assert "Lineage ${request.session_lineage}" in source
     assert "${PLUGIN_ID}.demo" in source
     assert "expires" not in source

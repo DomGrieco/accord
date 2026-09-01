@@ -27,7 +27,7 @@ Missing or conflicting identity proof fails before `prompt.submit` and leaves th
 2. Command palette: Reload desktop plugins, then Open Accord approvals.
 3. Click a different Life chat. Do not use the plugin-work thread that renamed Accord.
 4. In Accord, click Queue demo in focused chat. Ignore parked card 336fc722.
-5. Open the new pending card. Confirm its Session id matches the focused chat.
+5. Open the new pending card. Confirm Session is the resume target for that chat. Lineage appears only if it differs.
 6. Choose Approve. Desktop must resume that stored session and submit a hidden decision prompt.
 7. Let the resumed session retry the same demo call once. The card must move through approved and claimed to succeeded.
 8. Repeat with a fresh card for Request changes, Deny, and Cancel. Each must resume with a nonempty hidden prompt. None may execute the demo effect.

@@ -318,6 +318,7 @@ function approvalSearchText(request) {
     request?.tool_name,
     request?.profile,
     request?.stored_session_id,
+    request?.session_lineage,
     request?.effect_kind,
     request?.state,
     request?.resume_state,
@@ -730,6 +731,9 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
           jsx('span', { children: `Digest ${request.call_digest}` }),
           jsx('span', { children: `Resume ${request.resume_state}` }),
           jsx('span', { children: `Session ${request.stored_session_id || 'unknown'}` }),
+          request.session_lineage &&
+            request.session_lineage !== request.stored_session_id &&
+            jsx('span', { children: `Lineage ${request.session_lineage}` }),
           jsx('span', { children: request.created_at })
         ]
       }),
@@ -1555,7 +1559,11 @@ function AccordPage({ ctx }) {
                   setDemoNotice('')
                   void queueFocusedDemo()
                     .then(result => {
-                      setDemoNotice(`Demo queued in ${result.session_key}. Review the new pending card.`)
+                      setQuery(result.session_key)
+                      setStateFilter('pending')
+                      setDemoNotice(
+                        `Demo queued. Resume session ${result.session_key}. Runtime ${result.runtime_id}. Search the new pending card. Ignore 336fc722.`
+                      )
                       host.notify({ kind: 'success', message: 'Accord demo queued in the focused chat.' })
                       return refresh()
                     })

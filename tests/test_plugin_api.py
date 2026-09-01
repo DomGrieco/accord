@@ -587,6 +587,40 @@ def test_every_decision_resume_envelope_targets_exact_record_session(
     assert instruction.json()["resume"]["stored_session_id"] == "runtime-tip"
 
 
+def test_inbox_session_field_matches_the_resume_target(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "gate.db"
+    request = _pending(
+        path,
+        session_id="runtime-tip",
+        session_lineage="stored-root",
+    )
+    client = _app(path)
+
+    listed = client.get("/requests?state=pending")
+    detail = client.get(f"/requests/{request.id}")
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    card = detail.json()["request"]
+    assert card["stored_session_id"] == "runtime-tip"
+    assert card["session_lineage"] == "stored-root"
+    assert listed.json()["requests"][0]["stored_session_id"] == "runtime-tip"
+
+    client.post("/owner/register", json={"token": OWNER_TOKEN})
+    client.post(
+        f"/requests/{request.id}/decision",
+        json=_decision_body(request, "approve", "Owner decision."),
+    )
+    instruction = client.post(
+        f"/requests/{request.id}/resume-instruction",
+        json={"token": OWNER_TOKEN},
+    )
+    assert instruction.status_code == 200
+    assert instruction.json()["resume"]["stored_session_id"] == card["stored_session_id"]
+
+
 def test_cancel_queues_nonexecuting_resume_to_originating_session(tmp_path: Path) -> None:
     path = tmp_path / "gate.db"
     request = _pending(path)
