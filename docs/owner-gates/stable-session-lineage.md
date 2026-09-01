@@ -23,11 +23,13 @@ Missing or conflicting identity proof fails before `prompt.submit` and leaves th
 
 ## Safe Desktop owner test
 
-1. Use the existing Life Desktop server after it has restarted on the patched local Hermes checkout. Do not start a second server.
-2. Open Accord from the Desktop sidebar.
-3. From a Life Desktop chat, call `accord_demo_effect` or the legacy `human_gate_demo_effect` alias with `Desktop approval panel fixture. No external effect.`
-4. Open the new card and choose Approve. Desktop must resume the exact stored session and submit a hidden decision prompt.
-5. Let the resumed session retry the same demo call once. The card must move through approved and claimed to succeeded, and the deterministic demo result must appear once.
-6. Repeat with a fresh card for Request changes, Deny, and Cancel. Each must resume with a nonempty hidden prompt. None may execute the demo effect.
+1. Use the existing Life Desktop. Do not start a second server.
+2. Command palette: Reload desktop plugins, then Open Accord approvals.
+3. Click a different Life chat. Do not use the plugin-work thread that renamed Accord.
+4. In Accord, click Queue demo in focused chat. Ignore parked card 336fc722.
+5. Open the new pending card. Confirm its Session id matches the focused chat.
+6. Choose Approve. Desktop must resume that stored session and submit a hidden decision prompt.
+7. Let the resumed session retry the same demo call once. The card must move through approved and claimed to succeeded.
+8. Repeat with a fresh card for Request changes, Deny, and Cancel. Each must resume with a nonempty hidden prompt. None may execute the demo effect.
 
 Keep generic policies empty and the X adapter disabled during this test. Do not use a live provider mutation.

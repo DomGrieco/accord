@@ -317,6 +317,7 @@ function approvalSearchText(request) {
     request?.id,
     request?.tool_name,
     request?.profile,
+    request?.stored_session_id,
     request?.effect_kind,
     request?.state,
     request?.resume_state,
@@ -538,6 +539,47 @@ export function selectRuntimeToClose(active, storedSessionId) {
   return runtimeSessionId
 }
 
+export const DEMO_FIXTURE_PROMPT = [
+  'Call the local Accord demo effect once with message "Accord desktop fixture. No external effect."',
+  'Use accord_demo_effect if that tool exists, otherwise human_gate_demo_effect.',
+  'Do not call any other tool. Do not post to X.'
+].join(' ')
+
+export async function queueFocusedDemo() {
+  const focusedRuntimeId = text(host.state?.focusedSessionId?.get?.())
+  if (!focusedRuntimeId) {
+    throw new Error('Focus a Life chat first. Accord will not queue a demo into an unknown session.')
+  }
+  const scope = focusedApiScope()
+  const route = await profileRoute(scope.profile)
+  const release = await host.retainProfile(route)
+  try {
+    const active = await host.requestProfile(route, 'session.active_list', {})
+    if (!active || !Array.isArray(active.sessions)) {
+      throw new Error('Hermes returned no valid sessions array.')
+    }
+    const matches = active.sessions.filter(row => row && String(row.id || '') === focusedRuntimeId)
+    if (matches.length !== 1) {
+      throw new Error('The focused chat is not a live Life session Accord can target.')
+    }
+    const storedSessionId = text(matches[0]?.session_key)
+    if (!storedSessionId) {
+      throw new Error('The focused chat has no stored session identity.')
+    }
+    await host.requestProfile(route, 'prompt.submit', {
+      session_id: focusedRuntimeId,
+      text: DEMO_FIXTURE_PROMPT
+    })
+    return {
+      runtime_id: focusedRuntimeId,
+      session_key: storedSessionId,
+      profile: scope.profile
+    }
+  } finally {
+    if (release) release()
+  }
+}
+
 export async function terminateSession(terminate) {
   const route = await profileRoute(terminate.profile)
   const release = await host.retainProfile(route)
@@ -687,6 +729,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
         children: [
           jsx('span', { children: `Digest ${request.call_digest}` }),
           jsx('span', { children: `Resume ${request.resume_state}` }),
+          jsx('span', { children: `Session ${request.stored_session_id || 'unknown'}` }),
           jsx('span', { children: request.created_at })
         ]
       }),
@@ -1433,6 +1476,9 @@ function AccordPage({ ctx }) {
   const [effectFilter, setEffectFilter] = useState('all')
   const [sort, setSort] = useState('newest')
   const [expandedId, setExpandedId] = useState('')
+  const [demoBusy, setDemoBusy] = useState(false)
+  const [demoError, setDemoError] = useState('')
+  const [demoNotice, setDemoNotice] = useState('')
   const { requests, loading, error, refresh } = useRequests(ctx)
   const pendingCount = useMemo(
     () => requests.filter(request => request.state === 'pending').length,
@@ -1476,7 +1522,7 @@ function AccordPage({ ctx }) {
               jsx('h1', { className: 'text-lg font-semibold', children: PLUGIN_DISPLAY_NAME }),
               jsx('p', {
                 className: 'max-w-2xl text-sm text-(--ui-text-secondary)',
-                children: 'Consequential tool calls stay blocked until you approve the exact call. Cards do not expire.'
+                children: 'Consequential tool calls stay blocked until you approve the exact call. Cards do not expire. Focus a different Life chat, then queue a demo. Do not use this plugin-work thread.'
               })
             ]
           }),
@@ -1502,6 +1548,27 @@ function AccordPage({ ctx }) {
               view === 'approvals' && jsx('button', {
                 type: 'button',
                 className: 'rounded border border-(--ui-stroke-secondary) px-2.5 py-1 text-xs',
+                disabled: demoBusy,
+                onClick: () => {
+                  setDemoBusy(true)
+                  setDemoError('')
+                  setDemoNotice('')
+                  void queueFocusedDemo()
+                    .then(result => {
+                      setDemoNotice(`Demo queued in ${result.session_key}. Review the new pending card.`)
+                      host.notify({ kind: 'success', message: 'Accord demo queued in the focused chat.' })
+                      return refresh()
+                    })
+                    .catch(cause => {
+                      setDemoError(cause instanceof Error ? cause.message : String(cause))
+                    })
+                    .finally(() => setDemoBusy(false))
+                },
+                children: demoBusy ? 'Queuing demo…' : 'Queue demo in focused chat'
+              }),
+              view === 'approvals' && jsx('button', {
+                type: 'button',
+                className: 'rounded border border-(--ui-stroke-secondary) px-2.5 py-1 text-xs',
                 onClick: () => void refresh(),
                 children: 'Refresh'
               })
@@ -1513,6 +1580,15 @@ function AccordPage({ ctx }) {
         role: 'alert',
         className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)',
         children: `Owner control could not initialize. ${ownerError}`
+      }),
+      demoError && jsx('div', {
+        role: 'alert',
+        className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)',
+        children: demoError
+      }),
+      demoNotice && jsx('div', {
+        className: 'rounded bg-(--ui-success-bg) p-3 text-sm text-(--ui-success)',
+        children: demoNotice
       }),
       view === 'approvals' && error && jsx('div', {
         role: 'alert',
@@ -1658,6 +1734,27 @@ export default {
           label: `Open ${PLUGIN_DISPLAY_NAME} approvals`,
           keywords: ['approval', 'accord', 'gate', 'human'],
           run: () => host.navigate(PLUGIN_ROUTE)
+        }
+      },
+      {
+        id: 'demo',
+        area: PALETTE_AREA,
+        data: {
+          id: `${PLUGIN_ID}.demo`,
+          label: `Queue ${PLUGIN_DISPLAY_NAME} demo in focused chat`,
+          keywords: ['approval', 'accord', 'demo', 'fixture'],
+          run: () => queueFocusedDemo().then(result => {
+            host.notify({
+              kind: 'success',
+              message: `Accord demo queued in ${result.session_key}.`
+            })
+            host.navigate(PLUGIN_ROUTE)
+          }).catch(cause => {
+            host.notify({
+              kind: 'error',
+              message: cause instanceof Error ? cause.message : String(cause)
+            })
+          })
         }
       }
     ])

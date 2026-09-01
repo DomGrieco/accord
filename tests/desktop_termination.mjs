@@ -628,4 +628,60 @@ for (const decision of ['approve', 'comment', 'deny', 'cancel']) {
   if (decision === 'comment') assert.match(matrixRpc[1].params.text, /smaller scope/)
 }
 
-console.log('Desktop decision matrix passed: approve, request changes, deny, cancel, resume failures')
+const queueFocusedDemo = plugin.namespace.queueFocusedDemo
+assert.equal(typeof queueFocusedDemo, 'function')
+assert.match(
+  plugin.namespace.DEMO_FIXTURE_PROMPT,
+  /accord_demo_effect[\s\S]*human_gate_demo_effect/
+)
+
+const demoRpc = []
+host.state = {
+  connectionId: { get: () => 'local' },
+  focusedSessionId: { get: () => '' },
+  focusedSessionOwner: {
+    get: () => ({ authoritative: true, connectionId: 'local', profile: 'life' })
+  },
+  focusedSessionProfile: { get: () => 'life' },
+  profile: { get: () => 'life' }
+}
+host.profileRoutes = async () => [route]
+host.retainProfile = async () => () => {}
+host.requestProfile = async (_selected, method, params) => {
+  demoRpc.push({ method, params })
+  throw new Error(`unexpected demo method ${method}`)
+}
+await assert.rejects(queueFocusedDemo(), /Focus a Life chat first/)
+assert.equal(demoRpc.length, 0)
+
+host.state.focusedSessionId = { get: () => 'runtime-demo' }
+host.requestProfile = async (_selected, method, params) => {
+  demoRpc.push({ method, params })
+  if (method === 'session.active_list') {
+    return { sessions: [{ id: 'other-runtime', session_key: 'other-stored' }] }
+  }
+  throw new Error(`unexpected demo method ${method}`)
+}
+demoRpc.length = 0
+await assert.rejects(queueFocusedDemo(), /not a live Life session/)
+assert.deepEqual(demoRpc.map(call => call.method), ['session.active_list'])
+
+host.requestProfile = async (_selected, method, params) => {
+  demoRpc.push({ method, params })
+  if (method === 'session.active_list') {
+    return { sessions: [{ id: 'runtime-demo', session_key: 'stored-demo' }] }
+  }
+  if (method === 'prompt.submit') return { accepted: true }
+  throw new Error(`unexpected demo method ${method}`)
+}
+demoRpc.length = 0
+assert.deepEqual(
+  JSON.parse(JSON.stringify(await queueFocusedDemo())),
+  { runtime_id: 'runtime-demo', session_key: 'stored-demo', profile: 'life' }
+)
+assert.deepEqual(demoRpc.map(call => call.method), ['session.active_list', 'prompt.submit'])
+assert.equal(demoRpc[1].params.session_id, 'runtime-demo')
+assert.equal(demoRpc[1].params.display_kind, undefined)
+assert.equal(demoRpc[1].params.text, plugin.namespace.DEMO_FIXTURE_PROMPT)
+
+console.log('Desktop decision matrix passed: approve, request changes, deny, cancel, resume failures, focused demo queue')
