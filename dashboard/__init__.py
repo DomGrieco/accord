@@ -1,1 +1,1 @@
-"""Dashboard backend package for Hermes Human Gate."""
+"""Dashboard backend package for Accord."""

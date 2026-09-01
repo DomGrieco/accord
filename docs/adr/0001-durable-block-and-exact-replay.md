@@ -6,13 +6,13 @@ Accepted for v0.1.
 
 ## Context
 
-Hermes native approval prompts wait inside a live tool call and expire. Human Gate needs decisions that can remain pending across restarts and that resume the original work later.
+Hermes native approval prompts wait inside a live tool call and expire. Accord needs decisions that can remain pending across restarts and that resume the original work later.
 
 A plugin `pre_tool_call` hook can veto a call. Hermes also exposes stored-session resume and hidden prompt submission in Desktop. This allows the request and the decision to happen in separate turns.
 
 ## Decision
 
-When a configured tool is first called, Human Gate will persist a request and return a block result. It will not keep a callback or model turn alive.
+When a configured tool is first called, Accord will persist a request and return a block result. It will not keep a callback or model turn alive.
 
 After any owner decision, Desktop will resume the exact originating stored session and submit a nonempty hidden continuation that includes any optional owner reason:
 

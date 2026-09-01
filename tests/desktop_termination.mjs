@@ -324,11 +324,29 @@ assert.deepEqual(
   { requests: [] }
 )
 assert.deepEqual(JSON.parse(JSON.stringify(apiCalls)), [{
-  path: '/api/plugins/human-gate/requests?state=pending',
+  path: '/api/plugins/accord/requests?state=pending',
   profile: 'life',
   connectionId: 'local'
 }])
 assert.equal(restCalls.length, 0)
+
+apiCalls.length = 0
+context.window.hermesDesktop.api = async request => {
+  apiCalls.push(request)
+  if (String(request.path).startsWith('/api/plugins/accord/')) {
+    throw new Error('Error invoking remote method hermes:api: Error: 404: Plugin not found')
+  }
+  return { requests: [{ id: 'legacy' }] }
+}
+assert.deepEqual(
+  JSON.parse(JSON.stringify(await pluginRest(ctx, '/requests?state=pending'))),
+  { requests: [{ id: 'legacy' }] }
+)
+assert.equal(apiCalls.at(-1).path, '/api/plugins/human-gate/requests?state=pending')
+context.window.hermesDesktop.api = async request => {
+  apiCalls.push(request)
+  return { requests: [] }
+}
 
 host.state.focusedSessionOwner = {
   get: () => ({ authoritative: true, connectionId: 'local', profile: 'splashifax' })
@@ -355,7 +373,7 @@ assert.deepEqual(
   { requests: [] }
 )
 assert.equal(apiCalls.at(-1).profile, 'life')
-assert.equal(apiCalls.at(-1).path, '/api/plugins/human-gate/requests?state=pending')
+assert.equal(apiCalls.at(-1).path, '/api/plugins/accord/requests?state=pending')
 
 const rememberFocusedOwner = plugin.namespace.rememberFocusedOwner
 rememberFocusedOwner({ profile: 'life', connectionId: 'local' })
@@ -364,7 +382,7 @@ host.state.focusedSessionProfile = { get: () => '' }
 apiCalls.length = 0
 await pluginRest(ctx, '/requests?state=pending')
 assert.deepEqual(JSON.parse(JSON.stringify(apiCalls)), [{
-  path: '/api/plugins/human-gate/requests?state=pending',
+  path: '/api/plugins/accord/requests?state=pending',
   profile: 'life',
   connectionId: 'local'
 }])

@@ -1,6 +1,6 @@
 {
-  "name": "human-gate",
-  "label": "Human Gate",
+  "name": "accord",
+  "label": "Accord",
   "description": "Durable owner decisions for consequential tool calls",
   "icon": "ShieldCheck",
   "version": "0.1.0.dev0",

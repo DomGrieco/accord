@@ -62,7 +62,7 @@ def _lock_runtime_file(handle: BinaryIO) -> None:
         try:
             windows_lock.locking(handle.fileno(), windows_lock.LK_NBLCK, 1)
         except OSError as exc:
-            raise RuntimeError("Human Gate runtime is already active") from exc
+            raise RuntimeError("Accord runtime is already active") from exc
         return
 
     import fcntl
@@ -70,7 +70,7 @@ def _lock_runtime_file(handle: BinaryIO) -> None:
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        raise RuntimeError("Human Gate runtime is already active") from exc
+        raise RuntimeError("Accord runtime is already active") from exc
 
 
 def _unlock_runtime_file(handle: BinaryIO) -> None:

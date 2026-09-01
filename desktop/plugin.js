@@ -9,6 +9,11 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
+const PLUGIN_ID = 'accord'
+const LEGACY_PLUGIN_ID = 'human-gate'
+const PLUGIN_API_IDS = [PLUGIN_ID, LEGACY_PLUGIN_ID]
+const PLUGIN_DISPLAY_NAME = 'Accord'
+const PLUGIN_ROUTE = '/accord'
 const ACTIVE_STATES = 'pending,approved,changes_requested,denied,cancelled,claimed,executed,failed,uncertain'
 const ACTIVE_CANCELLED_RESUME_STATES = new Set(['pending', 'dispatching', 'failed'])
 const PROFILE_PROBE_PATH = '/requests?state=pending&limit=1'
@@ -75,9 +80,22 @@ function pluginApiSuffix(path) {
   const suffix = String(path || '').startsWith('/') ? String(path) : `/${String(path || '')}`
   const pathname = suffix.split(/[?#]/, 1)[0]
   if (pathname.split('/').includes('..')) {
-    throw new Error(`Human Gate API path traversal rejected: ${path}`)
+    throw new Error(`${PLUGIN_DISPLAY_NAME} API path traversal rejected: ${path}`)
   }
   return suffix
+}
+
+async function restAtPlugin(scope, path, options, pluginId) {
+  const request = {
+    path: `/api/plugins/${pluginId}${pluginApiSuffix(path)}`,
+    profile: scope.profile
+  }
+  if (scope.connectionId) request.connectionId = scope.connectionId
+  if (options.method !== undefined) request.method = options.method
+  if (options.body !== undefined) request.body = options.body
+  if (options.upload !== undefined) request.upload = options.upload
+  if (options.timeoutMs !== undefined) request.timeoutMs = options.timeoutMs
+  return window.hermesDesktop.api(request)
 }
 
 async function restAtScope(ctx, scope, path, options = {}) {
@@ -87,23 +105,28 @@ async function restAtScope(ctx, scope, path, options = {}) {
     (scope.connectionId === 'local' && !scope.activeConnectionId)
 
   if (scope.profile === scope.activeProfile && connectionMatches) {
-    return ctx.rest(path, options)
+    try {
+      return await ctx.rest(path, options)
+    } catch (cause) {
+      if (!pluginNotFound(cause)) throw cause
+    }
   }
 
   if (!window.hermesDesktop?.api) {
     throw new Error('Hermes Desktop API bridge unavailable for the focused profile.')
   }
 
-  const request = {
-    path: `/api/plugins/human-gate${pluginApiSuffix(path)}`,
-    profile: scope.profile
+  let lastError
+  for (const pluginId of PLUGIN_API_IDS) {
+    try {
+      return await restAtPlugin(scope, path, options, pluginId)
+    } catch (cause) {
+      lastError = cause
+      if (pluginNotFound(cause)) continue
+      throw cause
+    }
   }
-  if (scope.connectionId) request.connectionId = scope.connectionId
-  if (options.method !== undefined) request.method = options.method
-  if (options.body !== undefined) request.body = options.body
-  if (options.upload !== undefined) request.upload = options.upload
-  if (options.timeoutMs !== undefined) request.timeoutMs = options.timeoutMs
-  return window.hermesDesktop.api(request)
+  throw lastError
 }
 
 function pluginNotFound(cause) {
@@ -126,12 +149,12 @@ async function discoverPluginScope(ctx, rejectedScope) {
 
   pluginScopeResolution = (async () => {
     if (typeof host.profileRoutes !== 'function') {
-      throw new Error('Human Gate could not inspect Hermes profile routes.')
+      throw new Error('Accord could not inspect Hermes profile routes.')
     }
 
     const routes = await host.profileRoutes()
     if (!Array.isArray(routes)) {
-      throw new Error('Hermes returned an invalid profile route list for Human Gate.')
+      throw new Error('Hermes returned an invalid profile route list for Accord.')
     }
 
     const seen = new Set()
@@ -164,8 +187,8 @@ async function discoverPluginScope(ctx, rejectedScope) {
     if (matches.length !== 1) {
       throw new Error(
         matches.length === 0
-          ? 'Human Gate is not enabled in any available Hermes profile.'
-          : 'Human Gate is enabled in more than one Hermes profile. Select its owning profile first.'
+          ? 'Accord is not enabled in any available Hermes profile.'
+          : 'Accord is enabled in more than one Hermes profile. Select its owning profile first.'
       )
     }
     resolvedPluginScope = matches[0]
@@ -394,7 +417,7 @@ export async function submitResume(ctx, resume, token) {
   try {
     const prompt = typeof resume?.prompt === 'string' ? resume.prompt.trim() : ''
     if (!prompt) {
-      throw new Error('Human Gate refused to deliver an empty decision prompt; a nonempty decision prompt is required.')
+      throw new Error('Accord refused to deliver an empty decision prompt; a nonempty decision prompt is required.')
     }
     const route = await profileRoute(resume.profile)
     release = await host.retainProfile(route)
@@ -729,7 +752,7 @@ function ApprovalCard({ ctx, request, ownerToken, onChanged }) {
       }),
       request.resume_state === 'dispatching' && jsx('p', {
         className: 'text-xs text-(--ui-warning)',
-        children: 'Session wake is in progress or uncertain. Human Gate will not retry it automatically.'
+        children: 'Session wake is in progress or uncertain. Accord will not retry it automatically.'
       }),
 
       error && jsx('div', {
@@ -1325,7 +1348,7 @@ function PolicySettings({ ctx, ownerToken }) {
       setPolicies(Array.isArray(result.policies) ? result.policies : [])
       setDigest(result.digest || '')
       setNotice('Policies saved. Restart the Hermes agent process before relying on the new rules.')
-      host.notify({ kind: 'success', message: 'Human Gate policies saved.' })
+      host.notify({ kind: 'success', message: 'Accord policies saved.' })
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -1388,7 +1411,7 @@ function PolicySettings({ ctx, ownerToken }) {
       }, policyEditorKey(index, policy))),
       !loading && !policies.length && jsx('div', {
         className: 'rounded-lg border border-dashed border-(--ui-stroke-secondary) p-6 text-sm text-(--ui-text-tertiary)',
-        children: 'No explicit policies. Built-in Human Gate effects are still protected.'
+        children: 'No explicit policies. Built-in Accord effects are still protected.'
       }),
       notice && jsx('div', { className: 'rounded bg-(--ui-success-bg) p-3 text-sm text-(--ui-success)', children: notice }),
       optionsError && jsx('div', {
@@ -1401,7 +1424,7 @@ function PolicySettings({ ctx, ownerToken }) {
   })
 }
 
-function HumanGatePage({ ctx }) {
+function AccordPage({ ctx }) {
   const [ownerToken, setOwnerToken] = useState('')
   const [ownerError, setOwnerError] = useState('')
   const [view, setView] = useState('approvals')
@@ -1450,7 +1473,7 @@ function HumanGatePage({ ctx }) {
           jsxs('div', {
             className: 'grid gap-1',
             children: [
-              jsx('h1', { className: 'text-lg font-semibold', children: 'Human Gate' }),
+              jsx('h1', { className: 'text-lg font-semibold', children: PLUGIN_DISPLAY_NAME }),
               jsx('p', {
                 className: 'max-w-2xl text-sm text-(--ui-text-secondary)',
                 children: 'Consequential tool calls stay blocked until you approve the exact call. Cards do not expire.'
@@ -1597,15 +1620,15 @@ function PendingStatus({ ctx }) {
     className: count
       ? 'rounded px-1.5 text-[0.6875rem] font-medium text-(--ui-warning)'
       : 'rounded px-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
-    onClick: () => host.navigate('/human-gate'),
-    'aria-label': `${count} pending Human Gate approvals`,
-    children: `gate ${count}`
+    onClick: () => host.navigate(PLUGIN_ROUTE),
+    'aria-label': `${count} pending ${PLUGIN_DISPLAY_NAME} approvals`,
+    children: `accord ${count}`
   })
 }
 
 export default {
-  id: 'human-gate',
-  name: 'Human Gate',
+  id: PLUGIN_ID,
+  name: PLUGIN_DISPLAY_NAME,
   defaultEnabled: true,
   register(ctx) {
     trackFocusedOwner(ctx)
@@ -1613,13 +1636,13 @@ export default {
       {
         id: 'page',
         area: ROUTES_AREA,
-        data: { path: '/human-gate' },
-        render: () => jsx(HumanGatePage, { ctx })
+        data: { path: PLUGIN_ROUTE },
+        render: () => jsx(AccordPage, { ctx })
       },
       {
         id: 'nav',
         area: SIDEBAR_NAV_AREA,
-        data: { path: '/human-gate', label: 'Human Gate', codicon: 'shield' }
+        data: { path: PLUGIN_ROUTE, label: PLUGIN_DISPLAY_NAME, codicon: 'shield' }
       },
       {
         id: 'status',
@@ -1631,10 +1654,10 @@ export default {
         id: 'open',
         area: PALETTE_AREA,
         data: {
-          id: 'human-gate.open',
-          label: 'Open Human Gate approvals',
-          keywords: ['approval', 'gate', 'human'],
-          run: () => host.navigate('/human-gate')
+          id: `${PLUGIN_ID}.open`,
+          label: `Open ${PLUGIN_DISPLAY_NAME} approvals`,
+          keywords: ['approval', 'accord', 'gate', 'human'],
+          run: () => host.navigate(PLUGIN_ROUTE)
         }
       }
     ])

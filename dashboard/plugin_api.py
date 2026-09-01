@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 _PACKAGE_DIR = _PLUGIN_ROOT / "human_gate"
 if not _PACKAGE_DIR.is_dir():
-    raise ImportError("Human Gate package is missing from the plugin root")
+    raise ImportError("Accord package is missing from the plugin root")
 
 _plugin_root_text = str(_PLUGIN_ROOT)
 sys.path[:] = [entry for entry in sys.path if entry != _plugin_root_text]
@@ -27,14 +27,19 @@ import human_gate as _human_gate  # noqa: E402
 
 _package_file = getattr(_human_gate, "__file__", None)
 if _package_file is None or not Path(_package_file).resolve().is_relative_to(_PLUGIN_ROOT):
-    raise ImportError("Human Gate resolved outside the plugin root")
+    raise ImportError("Accord resolved outside the plugin root")
 
+from human_gate.identity import (  # noqa: E402
+    PLUGIN_DISPLAY_NAME,
+    PLUGIN_ID,
+    POLICY_ENTRY_CANDIDATES,
+)
 from human_gate.models import Decision, RequestRecord, RequestState  # noqa: E402
 from human_gate.paths import resolve_db_path  # noqa: E402
 from human_gate.policy import is_safe_projection_field, policies_from_config  # noqa: E402
 from human_gate.store import ConflictError, GateStore  # noqa: E402
 
-_POLICY_CONFIG_PATH = "plugins.entries.human-gate.settings.policies"
+_POLICY_CONFIG_PATH = f"plugins.entries.{PLUGIN_ID}.settings.policies"
 _SETTINGS_LOCK = threading.RLock()
 _MAX_OPTION_TOOLS = 512
 _MAX_OPTION_FIELDS = 64
@@ -46,7 +51,7 @@ def _cross_process_settings_lock():
     """Serialize policy compare-and-write operations across dashboard processes."""
     from hermes_constants import get_config_path
 
-    lock_path = get_config_path().with_name("config.yaml.human-gate.lock")
+    lock_path = get_config_path().with_name(f"config.yaml.{PLUGIN_ID}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock_file:
         deadline = time.monotonic() + 10.0
@@ -69,7 +74,7 @@ def _cross_process_settings_lock():
             except (BlockingIOError, OSError, PermissionError) as exc:
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        "timed out waiting for the Human Gate settings lock"
+                        f"timed out waiting for the {PLUGIN_DISPLAY_NAME} settings lock"
                     ) from exc
                 time.sleep(0.05)
         try:
@@ -256,18 +261,22 @@ def _read_policy_config() -> list[dict[str, Any]]:
     config = load_config_readonly() or {}
     plugins = config.get("plugins") if isinstance(config, Mapping) else None
     entries = plugins.get("entries") if isinstance(plugins, Mapping) else None
-    entry = entries.get("human-gate") if isinstance(entries, Mapping) else None
-    if not isinstance(entry, Mapping):
+    if not isinstance(entries, Mapping):
         return []
-    settings = entry.get("settings")
-    legacy = entry.get("config")
-    if isinstance(settings, Mapping) and "policies" in settings:
-        raw = settings.get("policies")
-    elif isinstance(legacy, Mapping):
-        raw = legacy.get("policies", [])
-    else:
-        raw = []
-    return _normalize_policy_config(raw)
+    for plugin_id in POLICY_ENTRY_CANDIDATES:
+        entry = entries.get(plugin_id)
+        if not isinstance(entry, Mapping):
+            continue
+        settings = entry.get("settings")
+        legacy = entry.get("config")
+        if isinstance(settings, Mapping) and "policies" in settings:
+            raw = settings.get("policies")
+        elif isinstance(legacy, Mapping):
+            raw = legacy.get("policies", [])
+        else:
+            continue
+        return _normalize_policy_config(raw)
+    return []
 
 
 def _set_policy_config_value(encoded_policies: str) -> None:
@@ -322,21 +331,21 @@ def _resume_prompt(record: RequestRecord, decision: Decision, comment: str) -> s
     owner_words = comment.strip()
     if decision is Decision.APPROVE:
         prompt = (
-            f"Human Gate request {record.id} was approved by the owner. "
+            f"{PLUGIN_DISPLAY_NAME} request {record.id} was approved by the owner. "
             "Retry the exact original tool call once without changing its arguments. "
             "Do not improvise another consequential action."
         )
     elif decision is Decision.COMMENT:
         prompt = (
-            f"Human Gate request {record.id} needs changes from the owner. "
+            f"{PLUGIN_DISPLAY_NAME} request {record.id} needs changes from the owner. "
             f"Owner comment: {owner_words} "
             "Revise the proposal. Do not replay the old call or its digest. "
             "Any revised consequential tool call requires a new approval request."
         )
     elif decision is Decision.DENY:
-        prompt = f"Human Gate request {record.id} was denied by the owner. Do not execute it."
+        prompt = f"{PLUGIN_DISPLAY_NAME} request {record.id} was denied by the owner. Do not execute it."
     else:
-        prompt = f"Human Gate request {record.id} was cancelled. Do not execute it."
+        prompt = f"{PLUGIN_DISPLAY_NAME} request {record.id} was cancelled. Do not execute it."
     if owner_words and decision is not Decision.COMMENT:
         prompt = f"{prompt} Owner reason: {owner_words}"
     if not prompt.strip():

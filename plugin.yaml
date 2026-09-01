@@ -1,6 +1,6 @@
-name: human-gate
+name: accord
 version: 0.1.0.dev0
-description: "Durable non-expiring human approval cards for consequential Hermes Agent tool calls."
+description: "Accord: durable non-expiring owner approval cards for consequential Hermes Agent tool calls."
 author: Dominic Grieco
 kind: standalone
 platforms:
@@ -8,6 +8,10 @@ platforms:
   - macos
   - windows
 provides_tools:
+  - accord_list
+  - accord_get
+  - accord_demo_effect
+  - accord_mock_publish
   - human_gate_list
   - human_gate_get
   - human_gate_demo_effect

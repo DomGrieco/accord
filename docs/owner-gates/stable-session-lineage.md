@@ -4,9 +4,9 @@ Status: ready for local Desktop testing. The generic Hermes host slice exists lo
 
 ## Why this blocks cold resume
 
-Hermes currently passes the agent runtime `session_id` and a per turn `task_id`. A resumed stored Desktop session can create a new runtime `session_id`. If Human Gate binds approval to that runtime ID, the approved digest cannot match after cold resume. If it omits lineage, an approval could cross sessions.
+Hermes currently passes the agent runtime `session_id` and a per turn `task_id`. A resumed stored Desktop session can create a new runtime `session_id`. If Accord binds approval to that runtime ID, the approved digest cannot match after cold resume. If it omits lineage, an approval could cross sessions.
 
-Human Gate now accepts `session_key` from both hook paths. When present, it uses that stable key for the persisted resume target and canonical approval lineage. It rejects configured tools with `human_gate_unroutable` when neither a stable key nor the legacy `session_id` exists. It no longer writes a shared sentinel lineage.
+Accord now accepts `session_key` from both hook paths. When present, it uses that stable key for the persisted resume target and canonical approval lineage. It rejects configured tools with `human_gate_unroutable` when neither a stable key nor the legacy `session_id` exists. It no longer writes a shared sentinel lineage.
 
 ## Local host integration
 
@@ -24,8 +24,8 @@ Missing or conflicting identity proof fails before `prompt.submit` and leaves th
 ## Safe Desktop owner test
 
 1. Use the existing Life Desktop server after it has restarted on the patched local Hermes checkout. Do not start a second server.
-2. Open Human Gate from the Desktop sidebar.
-3. From a Life Desktop chat, call `human_gate_demo_effect` with `Desktop approval panel fixture. No external effect.`
+2. Open Accord from the Desktop sidebar.
+3. From a Life Desktop chat, call `accord_demo_effect` or the legacy `human_gate_demo_effect` alias with `Desktop approval panel fixture. No external effect.`
 4. Open the new card and choose Approve. Desktop must resume the exact stored session and submit a hidden decision prompt.
 5. Let the resumed session retry the same demo call once. The card must move through approved and claimed to succeeded, and the deterministic demo result must appear once.
 6. Repeat with a fresh card for Request changes, Deny, and Cancel. Each must resume with a nonempty hidden prompt. None may execute the demo effect.

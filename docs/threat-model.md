@@ -10,8 +10,8 @@ For v0.1:
 
 - Hermes Agent core and plugin loader
 - Hermes Desktop and its authenticated gateway connection
-- Human Gate runtime and SQLite store
-- Human Gate owned effect adapters
+- Accord runtime and SQLite store
+- Accord owned effect adapters
 - The local operating system and user account
 
 ## Untrusted inputs

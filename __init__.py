@@ -1,4 +1,4 @@
-"""Hermes Human Gate plugin registration."""
+"""Accord plugin registration."""
 
 from __future__ import annotations
 
@@ -12,12 +12,34 @@ try:
         mock_publish_handler,
     )
     from .human_gate.gate import GateDecision, HumanGate
+    from .human_gate.identity import (
+        DEMO_EFFECT_TOOL,
+        GET_TOOL,
+        LEGACY_DEMO_EFFECT_TOOL,
+        LEGACY_GET_TOOL,
+        LEGACY_LIST_TOOL,
+        LEGACY_MOCK_PUBLISH_TOOL,
+        LIST_TOOL,
+        MOCK_PUBLISH_TOOL,
+        PLUGIN_DISPLAY_NAME,
+        TOOLSET,
+    )
     from .human_gate.models import Decision as Decision
     from .human_gate.models import RequestRecord, RequestState
     from .human_gate.paths import resolve_db_path
     from .human_gate.policy import ToolPolicy, policies_from_config
     from .human_gate.runtime_registry import get_process_runtime_state
-    from .human_gate.schemas import DEMO_EFFECT, GET, LIST, MOCK_PUBLISH, X_CREATE_POST
+    from .human_gate.schemas import (
+        DEMO_EFFECT,
+        GET,
+        LEGACY_DEMO_EFFECT,
+        LEGACY_GET,
+        LEGACY_LIST,
+        LEGACY_MOCK_PUBLISH,
+        LIST,
+        MOCK_PUBLISH,
+        X_CREATE_POST,
+    )
     from .human_gate.store import GateStore
     from .human_gate.xurl_adapter import (
         XPublisherConfig,
@@ -35,12 +57,34 @@ except ImportError:  # pragma: no cover - repository-level plugin doctor import
         mock_publish_handler,
     )
     from human_gate.gate import GateDecision, HumanGate
+    from human_gate.identity import (
+        DEMO_EFFECT_TOOL,
+        GET_TOOL,
+        LEGACY_DEMO_EFFECT_TOOL,
+        LEGACY_GET_TOOL,
+        LEGACY_LIST_TOOL,
+        LEGACY_MOCK_PUBLISH_TOOL,
+        LIST_TOOL,
+        MOCK_PUBLISH_TOOL,
+        PLUGIN_DISPLAY_NAME,
+        TOOLSET,
+    )
     from human_gate.models import Decision as Decision
     from human_gate.models import RequestRecord, RequestState
     from human_gate.paths import resolve_db_path
     from human_gate.policy import ToolPolicy, policies_from_config
     from human_gate.runtime_registry import get_process_runtime_state
-    from human_gate.schemas import DEMO_EFFECT, GET, LIST, MOCK_PUBLISH, X_CREATE_POST
+    from human_gate.schemas import (
+        DEMO_EFFECT,
+        GET,
+        LEGACY_DEMO_EFFECT,
+        LEGACY_GET,
+        LEGACY_LIST,
+        LEGACY_MOCK_PUBLISH,
+        LIST,
+        MOCK_PUBLISH,
+        X_CREATE_POST,
+    )
     from human_gate.store import GateStore
     from human_gate.xurl_adapter import (
         XPublisherConfig,
@@ -81,7 +125,7 @@ def _request_payload(record: RequestRecord) -> dict[str, Any]:
 def _require_gate() -> HumanGate:
     gate = _runtime_state.gate
     if gate is None:
-        raise RuntimeError("Human Gate plugin is not initialized")
+        raise RuntimeError(f"{PLUGIN_DISPLAY_NAME} plugin is not initialized")
     return gate
 
 
@@ -95,9 +139,9 @@ def _runtime_snapshot() -> tuple[HumanGate, XPublisherConfig]:
         gate = _runtime_state.gate
         config = _runtime_state.x_config
     if not isinstance(gate, HumanGate):
-        raise RuntimeError("Human Gate plugin is not initialized")
+        raise RuntimeError(f"{PLUGIN_DISPLAY_NAME} plugin is not initialized")
     if not isinstance(config, XPublisherConfig):
-        raise RuntimeError("Human Gate X configuration is unavailable")
+        raise RuntimeError(f"{PLUGIN_DISPLAY_NAME} X configuration is unavailable")
     return gate, config
 
 
@@ -297,7 +341,7 @@ def register(ctx: Any) -> None:
 
     policies.register(
         ToolPolicy(
-            tool_name="human_gate_demo_effect",
+            tool_name=DEMO_EFFECT_TOOL,
             effect_kind="demo",
             display_fields=("message",),
             replay_fields=("message",),
@@ -307,7 +351,27 @@ def register(ctx: Any) -> None:
     )
     policies.register(
         ToolPolicy(
-            tool_name="human_gate_mock_publish",
+            tool_name=LEGACY_DEMO_EFFECT_TOOL,
+            effect_kind="demo",
+            display_fields=("message",),
+            replay_fields=("message",),
+            owned_effect=True,
+            owned_handler_identity="human_gate.demo_effect.v1",
+        )
+    )
+    policies.register(
+        ToolPolicy(
+            tool_name=MOCK_PUBLISH_TOOL,
+            effect_kind="publish",
+            display_fields=("destination", "text", "media_sha256", "simulate_outcome"),
+            replay_fields=("destination", "text", "media_sha256", "simulate_outcome"),
+            owned_effect=True,
+            owned_handler_identity="human_gate.mock_publish.v1",
+        )
+    )
+    policies.register(
+        ToolPolicy(
+            tool_name=LEGACY_MOCK_PUBLISH_TOOL,
             effect_kind="publish",
             display_fields=("destination", "text", "media_sha256", "simulate_outcome"),
             replay_fields=("destination", "text", "media_sha256", "simulate_outcome"),
@@ -380,7 +444,7 @@ def register(ctx: Any) -> None:
             existing_key = _runtime_state.registration_key
             if existing_key is None or existing_key[:2] != registration_key[:2]:
                 raise RuntimeError(
-                    "Human Gate runtime cannot change profile or database while active: "
+                    f"{PLUGIN_DISPLAY_NAME} runtime cannot change profile or database while active: "
                     f"existing={existing_key!r}, requested={registration_key!r}"
                 )
             existing_gate = _runtime_state.gate
@@ -389,35 +453,63 @@ def register(ctx: Any) -> None:
         gate = _runtime_state.gate
         _runtime_state.x_config = x_config
         if gate is None:  # pragma: no cover - guarded by the branch above
-            raise RuntimeError("Human Gate plugin is not initialized")
+            raise RuntimeError(f"{PLUGIN_DISPLAY_NAME} plugin is not initialized")
         _gate = gate
         _registration_key = _runtime_state.registration_key
         store = gate.store
     ctx.register_tool(
-        name="human_gate_list",
-        toolset="human_gate",
+        name=LIST_TOOL,
+        toolset=TOOLSET,
         schema=LIST,
         handler=_list_handler,
         emoji="✋",
     )
     ctx.register_tool(
-        name="human_gate_get",
-        toolset="human_gate",
+        name=LEGACY_LIST_TOOL,
+        toolset=TOOLSET,
+        schema=LEGACY_LIST,
+        handler=_list_handler,
+        emoji="✋",
+    )
+    ctx.register_tool(
+        name=GET_TOOL,
+        toolset=TOOLSET,
         schema=GET,
         handler=_get_handler,
         emoji="✋",
     )
     ctx.register_tool(
-        name="human_gate_demo_effect",
-        toolset="human_gate",
+        name=LEGACY_GET_TOOL,
+        toolset=TOOLSET,
+        schema=LEGACY_GET,
+        handler=_get_handler,
+        emoji="✋",
+    )
+    ctx.register_tool(
+        name=DEMO_EFFECT_TOOL,
+        toolset=TOOLSET,
         schema=DEMO_EFFECT,
         handler=demo_effect_handler,
         emoji="✋",
     )
     ctx.register_tool(
-        name="human_gate_mock_publish",
-        toolset="human_gate",
+        name=LEGACY_DEMO_EFFECT_TOOL,
+        toolset=TOOLSET,
+        schema=LEGACY_DEMO_EFFECT,
+        handler=demo_effect_handler,
+        emoji="✋",
+    )
+    ctx.register_tool(
+        name=MOCK_PUBLISH_TOOL,
+        toolset=TOOLSET,
         schema=MOCK_PUBLISH,
+        handler=lambda args, **kwargs: mock_publish_handler(store, args, **kwargs),
+        emoji="✋",
+    )
+    ctx.register_tool(
+        name=LEGACY_MOCK_PUBLISH_TOOL,
+        toolset=TOOLSET,
+        schema=LEGACY_MOCK_PUBLISH,
         handler=lambda args, **kwargs: mock_publish_handler(store, args, **kwargs),
         emoji="✋",
     )

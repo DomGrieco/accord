@@ -21,6 +21,7 @@ def isolate_plugin_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_process_runtime_for_tests()
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("HUMAN_GATE_DB_PATH", raising=False)
+    monkeypatch.delenv("ACCORD_DB_PATH", raising=False)
     yield
     reset_process_runtime_for_tests()
 
@@ -115,6 +116,8 @@ def test_plugin_registers_owned_tool_hook_and_execution_middleware(tmp_path: Pat
 
     plugin.register(context)
 
+    assert "accord_demo_effect" in context.tools
+    assert "accord_mock_publish" in context.tools
     assert "human_gate_demo_effect" in context.tools
     assert "human_gate_mock_publish" in context.tools
     assert "x_create_post" in context.tools

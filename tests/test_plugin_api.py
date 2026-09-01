@@ -468,7 +468,7 @@ def test_owner_registration_and_approval_return_durable_resume_instruction(
         "request_id": request.id,
         "record_version": instruction.json()["request"]["record_version"],
         "prompt": (
-            f"Human Gate request {request.id} was approved by the owner. "
+            f"Accord request {request.id} was approved by the owner. "
             "Retry the exact original tool call once without changing its arguments. "
             "Do not improvise another consequential action."
         ),
