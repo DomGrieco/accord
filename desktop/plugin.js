@@ -18,7 +18,6 @@ const ACTIVE_STATES = 'pending,approved,changes_requested,denied,cancelled,claim
 const ACTIVE_CANCELLED_RESUME_STATES = new Set(['pending', 'dispatching', 'failed'])
 const PROFILE_PROBE_PATH = '/requests?state=pending&limit=1'
 let lastFocusedOwner = null
-let lastFocusedSessionId = ''
 let resolvedPluginScope = null
 let pluginScopeResolution = null
 
@@ -39,17 +38,6 @@ export function rememberFocusedOwner(owner) {
     connectionId: text(owner?.connectionId),
     profile
   }
-}
-
-export function rememberFocusedSession(sessionId) {
-  const id = text(sessionId)
-  if (id) lastFocusedSessionId = id
-}
-
-function resolveFocusedRuntimeId() {
-  const live = text(host.state?.focusedSessionId?.get?.())
-  rememberFocusedSession(live)
-  return live || lastFocusedSessionId
 }
 
 function focusedApiScope() {
@@ -229,13 +217,9 @@ export async function profileRest(ctx, path, options = {}) {
 function trackFocusedOwner(ctx) {
   const ownerAtom = host.state?.focusedSessionOwner
   rememberFocusedOwner(ownerAtom?.get?.())
-  const stopOwner = ownerAtom?.listen?.(rememberFocusedOwner)
-  const sessionAtom = host.state?.focusedSessionId
-  rememberFocusedSession(sessionAtom?.get?.())
-  const stopSession = sessionAtom?.listen?.(rememberFocusedSession)
-  if (typeof ctx.onDispose === 'function') {
-    if (typeof stopOwner === 'function') ctx.onDispose(stopOwner)
-    if (typeof stopSession === 'function') ctx.onDispose(stopSession)
+  const stop = ownerAtom?.listen?.(rememberFocusedOwner)
+  if (typeof stop === 'function' && typeof ctx.onDispose === 'function') {
+    ctx.onDispose(stop)
   }
 }
 
@@ -562,47 +546,6 @@ export function selectRuntimeToClose(active, storedSessionId) {
     throw new Error('The matching live runtime had no session id.')
   }
   return runtimeSessionId
-}
-
-export const DEMO_FIXTURE_PROMPT = [
-  'Call the local Accord demo effect once with message "Accord desktop fixture. No external effect."',
-  'Use accord_demo_effect if that tool exists, otherwise human_gate_demo_effect.',
-  'Do not call any other tool. Do not post to X.'
-].join(' ')
-
-export async function queueFocusedDemo() {
-  const focusedRuntimeId = resolveFocusedRuntimeId()
-  if (!focusedRuntimeId) {
-    throw new Error('Focus a Life chat first. Accord will not queue a demo into an unknown session.')
-  }
-  const scope = focusedApiScope()
-  const route = await profileRoute(scope.profile)
-  const release = await host.retainProfile(route)
-  try {
-    const active = await host.requestProfile(route, 'session.active_list', {})
-    if (!active || !Array.isArray(active.sessions)) {
-      throw new Error('Hermes returned no valid sessions array.')
-    }
-    const matches = active.sessions.filter(row => row && String(row.id || '') === focusedRuntimeId)
-    if (matches.length !== 1) {
-      throw new Error('The focused chat is not a live Life session Accord can target.')
-    }
-    const storedSessionId = text(matches[0]?.session_key)
-    if (!storedSessionId) {
-      throw new Error('The focused chat has no stored session identity.')
-    }
-    await host.requestProfile(route, 'prompt.submit', {
-      session_id: focusedRuntimeId,
-      text: DEMO_FIXTURE_PROMPT
-    })
-    return {
-      runtime_id: focusedRuntimeId,
-      session_key: storedSessionId,
-      profile: scope.profile
-    }
-  } finally {
-    if (release) release()
-  }
 }
 
 export async function terminateSession(terminate) {
@@ -1504,9 +1447,6 @@ function AccordPage({ ctx }) {
   const [effectFilter, setEffectFilter] = useState('all')
   const [sort, setSort] = useState('newest')
   const [expandedId, setExpandedId] = useState('')
-  const [demoBusy, setDemoBusy] = useState(false)
-  const [demoError, setDemoError] = useState('')
-  const [demoNotice, setDemoNotice] = useState('')
   const { requests, loading, error, refresh } = useRequests(ctx)
   const pendingCount = useMemo(
     () => requests.filter(request => request.state === 'pending').length,
@@ -1550,7 +1490,7 @@ function AccordPage({ ctx }) {
               jsx('h1', { className: 'text-lg font-semibold', children: PLUGIN_DISPLAY_NAME }),
               jsx('p', {
                 className: 'max-w-2xl text-sm text-(--ui-text-secondary)',
-                children: 'Consequential tool calls stay blocked until you approve the exact call. Cards do not expire. Focus a different Life chat, then queue a demo. Do not use this plugin-work thread.'
+                children: 'Consequential tool calls stay blocked until you approve the exact call. Cards do not expire.'
               })
             ]
           }),
@@ -1576,31 +1516,6 @@ function AccordPage({ ctx }) {
               view === 'approvals' && jsx('button', {
                 type: 'button',
                 className: 'rounded border border-(--ui-stroke-secondary) px-2.5 py-1 text-xs',
-                disabled: demoBusy,
-                onClick: () => {
-                  setDemoBusy(true)
-                  setDemoError('')
-                  setDemoNotice('')
-                  void queueFocusedDemo()
-                    .then(result => {
-                      setQuery(result.session_key)
-                      setStateFilter('pending')
-                      setDemoNotice(
-                        `Demo queued. Resume session ${result.session_key}. Runtime ${result.runtime_id}. Search the new pending card. Ignore 336fc722.`
-                      )
-                      host.notify({ kind: 'success', message: 'Accord demo queued in the focused chat.' })
-                      return refresh()
-                    })
-                    .catch(cause => {
-                      setDemoError(cause instanceof Error ? cause.message : String(cause))
-                    })
-                    .finally(() => setDemoBusy(false))
-                },
-                children: demoBusy ? 'Queuing demo…' : 'Queue demo in focused chat'
-              }),
-              view === 'approvals' && jsx('button', {
-                type: 'button',
-                className: 'rounded border border-(--ui-stroke-secondary) px-2.5 py-1 text-xs',
                 onClick: () => void refresh(),
                 children: 'Refresh'
               })
@@ -1612,15 +1527,6 @@ function AccordPage({ ctx }) {
         role: 'alert',
         className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)',
         children: `Owner control could not initialize. ${ownerError}`
-      }),
-      demoError && jsx('div', {
-        role: 'alert',
-        className: 'rounded bg-(--ui-danger-bg) p-3 text-sm text-(--ui-danger)',
-        children: demoError
-      }),
-      demoNotice && jsx('div', {
-        className: 'rounded bg-(--ui-success-bg) p-3 text-sm text-(--ui-success)',
-        children: demoNotice
       }),
       view === 'approvals' && error && jsx('div', {
         role: 'alert',
@@ -1766,27 +1672,6 @@ export default {
           label: `Open ${PLUGIN_DISPLAY_NAME} approvals`,
           keywords: ['approval', 'accord', 'gate', 'human'],
           run: () => host.navigate(PLUGIN_ROUTE)
-        }
-      },
-      {
-        id: 'demo',
-        area: PALETTE_AREA,
-        data: {
-          id: `${PLUGIN_ID}.demo`,
-          label: `Queue ${PLUGIN_DISPLAY_NAME} demo in focused chat`,
-          keywords: ['approval', 'accord', 'demo', 'fixture'],
-          run: () => queueFocusedDemo().then(result => {
-            host.notify({
-              kind: 'success',
-              message: `Accord demo queued in ${result.session_key}.`
-            })
-            host.navigate(PLUGIN_ROUTE)
-          }).catch(cause => {
-            host.notify({
-              kind: 'error',
-              message: cause instanceof Error ? cause.message : String(cause)
-            })
-          })
         }
       }
     ])

@@ -85,10 +85,10 @@ def test_desktop_plugin_uses_durable_decision_and_session_resume_contract() -> N
     assert "Choose a common effect or enter a custom label" in source
     assert "setOptions({ effect_kinds: [], tools: [] })" in source
     assert "setTimeout" in source
-    assert "Queue demo in focused chat" in source
-    assert "Focus a Life chat first" in source
+    assert "Queue demo in focused chat" not in source
+    assert "Focus a Life chat first" not in source
     assert "Human Gate owner binding is still in the approval database" in source
     assert "Session ${request.stored_session_id" in source
     assert "Lineage ${request.session_lineage}" in source
-    assert "${PLUGIN_ID}.demo" in source
+    assert "${PLUGIN_ID}.demo" not in source
     assert "expires" not in source
