@@ -684,4 +684,12 @@ assert.equal(demoRpc[1].params.session_id, 'runtime-demo')
 assert.equal(demoRpc[1].params.display_kind, undefined)
 assert.equal(demoRpc[1].params.text, plugin.namespace.DEMO_FIXTURE_PROMPT)
 
+host.state.focusedSessionId = { get: () => '' }
+demoRpc.length = 0
+assert.deepEqual(
+  JSON.parse(JSON.stringify(await queueFocusedDemo())),
+  { runtime_id: 'runtime-demo', session_key: 'stored-demo', profile: 'life' }
+)
+assert.equal(demoRpc[1].params.session_id, 'runtime-demo')
+
 console.log('Desktop decision matrix passed: approve, request changes, deny, cancel, resume failures, focused demo queue')

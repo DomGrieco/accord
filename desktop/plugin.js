@@ -18,6 +18,7 @@ const ACTIVE_STATES = 'pending,approved,changes_requested,denied,cancelled,claim
 const ACTIVE_CANCELLED_RESUME_STATES = new Set(['pending', 'dispatching', 'failed'])
 const PROFILE_PROBE_PATH = '/requests?state=pending&limit=1'
 let lastFocusedOwner = null
+let lastFocusedSessionId = ''
 let resolvedPluginScope = null
 let pluginScopeResolution = null
 
@@ -38,6 +39,17 @@ export function rememberFocusedOwner(owner) {
     connectionId: text(owner?.connectionId),
     profile
   }
+}
+
+export function rememberFocusedSession(sessionId) {
+  const id = text(sessionId)
+  if (id) lastFocusedSessionId = id
+}
+
+function resolveFocusedRuntimeId() {
+  const live = text(host.state?.focusedSessionId?.get?.())
+  rememberFocusedSession(live)
+  return live || lastFocusedSessionId
 }
 
 function focusedApiScope() {
@@ -217,9 +229,13 @@ export async function profileRest(ctx, path, options = {}) {
 function trackFocusedOwner(ctx) {
   const ownerAtom = host.state?.focusedSessionOwner
   rememberFocusedOwner(ownerAtom?.get?.())
-  const stop = ownerAtom?.listen?.(rememberFocusedOwner)
-  if (typeof stop === 'function' && typeof ctx.onDispose === 'function') {
-    ctx.onDispose(stop)
+  const stopOwner = ownerAtom?.listen?.(rememberFocusedOwner)
+  const sessionAtom = host.state?.focusedSessionId
+  rememberFocusedSession(sessionAtom?.get?.())
+  const stopSession = sessionAtom?.listen?.(rememberFocusedSession)
+  if (typeof ctx.onDispose === 'function') {
+    if (typeof stopOwner === 'function') ctx.onDispose(stopOwner)
+    if (typeof stopSession === 'function') ctx.onDispose(stopSession)
   }
 }
 
@@ -232,6 +248,14 @@ async function ensureOwner(ctx) {
   await profileRest(ctx, '/owner/register', {
     method: 'POST',
     body: { token }
+  }).catch(cause => {
+    const message = cause instanceof Error ? cause.message : String(cause)
+    if (/owner already registered/i.test(message)) {
+      throw new Error(
+        'Accord could not bind this Desktop window to the existing inbox owner token. The Human Gate owner binding is still in the approval database.'
+      )
+    }
+    throw cause
   })
   return token
 }
@@ -547,7 +571,7 @@ export const DEMO_FIXTURE_PROMPT = [
 ].join(' ')
 
 export async function queueFocusedDemo() {
-  const focusedRuntimeId = text(host.state?.focusedSessionId?.get?.())
+  const focusedRuntimeId = resolveFocusedRuntimeId()
   if (!focusedRuntimeId) {
     throw new Error('Focus a Life chat first. Accord will not queue a demo into an unknown session.')
   }
