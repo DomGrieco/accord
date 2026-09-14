@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from itertools import permutations
 from pathlib import Path
 from typing import Any
 
@@ -94,3 +95,57 @@ def test_mock_alias_uncertain_replay_requires_new_approval(tmp_path: Path, tool_
     assert results[0]["status"] == "uncertain"
     assert results[1]["ok"] is True and results[1]["replayed"] is True
     assert plugin._gate.store.count_mock_publications() == 1
+
+
+@pytest.mark.parametrize(
+    ("approved_tool", "attempted_tool"),
+    list(permutations(
+        ["accord_demo_effect", "human_gate_demo_effect", "accord_mock_publish", "human_gate_mock_publish"],
+        2,
+    )),
+)
+def test_approval_does_not_authorize_another_tool_name(
+    tmp_path: Path, approved_tool: str, attempted_tool: str,
+) -> None:
+    plugin = load_plugin()
+    context = FakeContext(tmp_path)
+    plugin.register(context)
+    pre_hook = context.hooks["pre_tool_call"]
+    middleware = context.middleware["tool_execution"]
+
+    def arguments(tool_name: str) -> dict[str, Any]:
+        if tool_name.endswith("mock_publish"):
+            return {
+                "destination": "mock", "text": "fixture", "media_sha256": [],
+                "idempotency_key": "name-isolation", "simulate_outcome": "success",
+            }
+        return {"message": "fixture"}
+
+    args = arguments(approved_tool)
+    blocked = pre_hook(tool_name=approved_tool, args=args, session_id="fixture-session")
+    approved_id = json.loads(blocked["message"])["request_id"]
+    plugin._gate.store.decide(approved_id, plugin.Decision.APPROVE, actor_id="fixture-owner")
+
+    def forbidden_dispatch(payload: dict[str, Any]) -> str:
+        raise AssertionError("Another tool name reached dispatch using the original approval")
+
+    denied = json.loads(middleware(
+        tool_name=attempted_tool, args=arguments(attempted_tool),
+        session_id="fixture-session", next_call=forbidden_dispatch,
+    ))
+    assert denied["status"] == "pending_approval"
+    assert denied["request_id"] != approved_id
+    pending = plugin._gate.store.get_request(denied["request_id"])
+    assert pending.tool_name == attempted_tool
+    assert pending.state.value == "pending"
+    assert plugin._gate.store.get_request(approved_id).state.value == "approved"
+    assert plugin._gate.store.count_mock_publications() == 0
+
+    result = json.loads(middleware(
+        tool_name=approved_tool, args=args, session_id="fixture-session",
+        next_call=context.tools[approved_tool][1],
+    ))
+    assert result["ok"] is True
+    assert plugin._gate.store.get_request(approved_id).state.value == "executed"
+    assert plugin._gate.store.get_request(denied["request_id"]).state.value == "pending"
+    assert plugin._gate.store.count_mock_publications() == int(approved_tool.endswith("mock_publish"))
