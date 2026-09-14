@@ -12,6 +12,12 @@ from typing import Any
 from .canonical import call_digest
 from .claims import consume_active_claim
 from .errors import EffectDefinitiveFailureError, EffectUncertainError
+from .identity import (
+    DEMO_EFFECT_TOOL,
+    LEGACY_DEMO_EFFECT_TOOL,
+    LEGACY_MOCK_PUBLISH_TOOL,
+    MOCK_PUBLISH_TOOL,
+)
 from .store import GateStore
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -212,7 +218,9 @@ def _run_xurl(command: list[str]) -> subprocess.CompletedProcess[str]:
 
 def demo_effect_handler(args: dict[str, Any], **_: Any) -> str:
     """A deterministic owned effect used to prove the gate contract."""
-    claim = consume_active_claim("human_gate_demo_effect", args)
+    claim = consume_active_claim(DEMO_EFFECT_TOOL, args) or consume_active_claim(
+        LEGACY_DEMO_EFFECT_TOOL, args
+    )
     if claim is None:
         return json.dumps(
             {
@@ -231,7 +239,9 @@ def demo_effect_handler(args: dict[str, Any], **_: Any) -> str:
 
 def mock_publish_handler(store: GateStore, args: dict[str, Any], **_: Any) -> str:
     """Run a persistent local publisher fixture behind an active one-use claim."""
-    claim = consume_active_claim("human_gate_mock_publish", args)
+    claim = consume_active_claim(MOCK_PUBLISH_TOOL, args) or consume_active_claim(
+        LEGACY_MOCK_PUBLISH_TOOL, args
+    )
     if claim is None:
         return json.dumps(
             {
