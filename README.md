@@ -105,7 +105,7 @@ Read the [v0.1 specification](docs/specs/v0.1.md), [threat model](docs/threat-mo
 
 ## Status
 
-Runtime implementation remains local and unpublished while development is in progress.
+Development source is available at [DomGrieco/accord](https://github.com/DomGrieco/accord). This is not a production release: live Desktop approval and originating-session continuation acceptance remain incomplete. Publishing the source does not authorize live provider mutations.
 
 ## License
 

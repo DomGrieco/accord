@@ -21,9 +21,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/DomGrieco/hermes-human-gate"
-Repository = "https://github.com/DomGrieco/hermes-human-gate"
-Issues = "https://github.com/DomGrieco/hermes-human-gate/issues"
+Homepage = "https://github.com/DomGrieco/accord"
+Repository = "https://github.com/DomGrieco/accord"
+Issues = "https://github.com/DomGrieco/accord/issues"
 
 [tool.setuptools]
 packages = ["human_gate"]
